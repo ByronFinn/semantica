@@ -387,8 +387,10 @@ class DecisionQuery:
 
         decisions = []
         for record in results:
-            decision_data = record.get("d") if isinstance(record, dict) else None
+            decision_data = self._node_props(record.get("d")) if isinstance(record, dict) else None
+
             if not isinstance(decision_data, dict):
+
                 decision_data = record if isinstance(record, dict) else {}
             decision = self._dict_to_decision(decision_data)
             
@@ -461,8 +463,10 @@ class DecisionQuery:
             
             decisions = []
             for record in results:
-                decision_data = record.get("d") if isinstance(record, dict) else None
+                decision_data = self._node_props(record.get("d")) if isinstance(record, dict) else None
+
                 if not isinstance(decision_data, dict):
+
                     decision_data = record if isinstance(record, dict) else {}
                 decisions.append(self._dict_to_decision(decision_data))
             
@@ -529,8 +533,10 @@ class DecisionQuery:
             
             decisions = []
             for record in results:
-                decision_data = record.get("d") if isinstance(record, dict) else None
+                decision_data = self._node_props(record.get("d")) if isinstance(record, dict) else None
+
                 if not isinstance(decision_data, dict):
+
                     decision_data = record if isinstance(record, dict) else {}
                 decisions.append(self._dict_to_decision(decision_data))
             
@@ -620,8 +626,10 @@ class DecisionQuery:
             
             decisions = []
             for record in results:
-                decision_data = record.get("d") if isinstance(record, dict) else None
+                decision_data = self._node_props(record.get("d")) if isinstance(record, dict) else None
+
                 if not isinstance(decision_data, dict):
+
                     decision_data = record if isinstance(record, dict) else {}
                 decisions.append(self._dict_to_decision(decision_data))
             
@@ -722,8 +730,10 @@ class DecisionQuery:
             
             decisions = []
             for record in results:
-                decision_data = record.get("d") if isinstance(record, dict) else None
+                decision_data = self._node_props(record.get("d")) if isinstance(record, dict) else None
+
                 if not isinstance(decision_data, dict):
+
                     decision_data = record if isinstance(record, dict) else {}
                 decision = self._dict_to_decision(decision_data)
                 decision.metadata["hop_count"] = record.get("hop_count", 0)
@@ -1299,6 +1309,23 @@ class DecisionQuery:
         except Exception as e:
             self.logger.error(f"Failed to predict relationships: {e}")
             return []
+
+    @staticmethod
+    def _node_props(value: Any) -> Any:
+        """Convert driver node/relationship objects (e.g. neo4j.Node) to property dicts.
+
+        Property-graph drivers return hydrated graph objects for ``RETURN d``-style
+        queries, not plain dicts — normalize transparently; dicts and scalars pass through.
+        """
+        if isinstance(value, dict):
+            return value
+        items = getattr(value, "items", None)
+        if callable(items):
+            try:
+                return dict(value.items())
+            except Exception:
+                return value
+        return value
 
     def _extract_records(self, results: Any) -> List[Dict[str, Any]]:
         """Normalize execute_query result shapes to a list of record maps."""
