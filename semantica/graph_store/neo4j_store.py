@@ -829,11 +829,20 @@ class Neo4jStore:
                     row = {}
                     for key in keys:
                         value = record[key]
-                        # Convert Neo4j types to Python types
-                        if hasattr(value, "__iter__") and not isinstance(value, (str, dict)):
-                            row[key] = list(value)
+                        # Convert Neo4j types to Python types.
+                        # Order matters: neo4j Node/Relationship expose BOTH the
+                        # Mapping protocol (items()) and __iter__ — the dict-like
+                        # branch must win, otherwise nodes degrade to lists and
+                        # their properties are lost.
+                        if isinstance(value, dict):
+                            row[key] = value
                         elif hasattr(value, "items"):
-                            row[key] = dict(value)
+                            try:
+                                row[key] = dict(value.items())
+                            except Exception:
+                                row[key] = value
+                        elif hasattr(value, "__iter__") and not isinstance(value, (str, bytes)):
+                            row[key] = list(value)
                         else:
                             row[key] = value
                     records.append(row)
