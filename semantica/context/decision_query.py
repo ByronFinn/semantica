@@ -78,6 +78,7 @@ Production Use Cases:
 
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
+import json
 import numpy as np
 
 from ..embeddings import EmbeddingGenerator
@@ -942,6 +943,15 @@ class DecisionQuery:
         if not decision_id:
             raise KeyError("decision_id")
 
+        # metadata is stored as a JSON string on property-graph stores
+        # (Neo4j property values cannot be maps) — deserialize transparently.
+        metadata = data.get("metadata", {})
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except (TypeError, ValueError):
+                metadata = {"raw": metadata}
+
         return Decision(
             decision_id=decision_id,
             category=data.get("category", ""),
@@ -953,7 +963,7 @@ class DecisionQuery:
             decision_maker=data.get("decision_maker", ""),
             reasoning_embedding=data.get("reasoning_embedding"),
             node2vec_embedding=data.get("node2vec_embedding"),
-            metadata=data.get("metadata", {}),
+            metadata=metadata,
         )
     
     def _dict_to_exception(self, data: Dict[str, Any]) -> PolicyException:
