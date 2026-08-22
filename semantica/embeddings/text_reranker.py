@@ -16,7 +16,8 @@ Key Features:
 Example Usage:
     >>> from semantica.embeddings.text_reranker import TextReranker
     >>> reranker = TextReranker(model_name="BAAI/bge-reranker-v2-m3")
-    >>> scores = reranker.rerank("血虚证 头晕心悸", ["四物汤主治...", "六味地黄丸..."])
+    >>> docs = ["Rivers overflow after heavy rain...", "Droughts reduce soil moisture..."]
+    >>> scores = reranker.rerank("what causes seasonal flooding", docs)
     >>> order = sorted(range(len(docs)), key=lambda i: -scores[i])
 
 Author: Semantica Contributors

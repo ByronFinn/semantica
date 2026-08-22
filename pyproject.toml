@@ -115,6 +115,7 @@ llm-all = [
 
 # ---- Document Parsing ----
 parse-docling = ["docling>=2.107.0"]
+parse-pdf = ["pdfplumber>=0.11"]
 
 # ---- SHACL Validation ----
 shacl = ["pyshacl>=0.25.0"]
