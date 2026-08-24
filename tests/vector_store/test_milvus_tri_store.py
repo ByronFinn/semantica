@@ -20,6 +20,7 @@ class FakeMilvusClient:
     def __init__(self, hits=None, has=False):
         self.created = {}
         self.inserted = {}
+        self._insert_batches = []
         self.searches = []
         self.dropped = []
         self._hits = hits or []
@@ -29,7 +30,8 @@ class FakeMilvusClient:
         self.created[collection_name] = (schema, index_params)
 
     def insert(self, collection_name, data):
-        self.inserted[collection_name] = data
+        self.inserted.setdefault(collection_name, []).extend(data)
+        self._insert_batches.append(list(data))
         return {"insert_count": len(data)}
 
     def search(self, collection_name, data, anns_field=None, search_params=None,
@@ -107,6 +109,32 @@ class TestTriCollectionPrimitives(unittest.TestCase):
         client = FakeMilvusClient()
         with self.assertRaises(Exception):
             ms.insert_tri_vectors(client, "c", [np.ones(8)], [{}, {}], [None, None])
+
+    def test_insert_split_into_batches_on_size_limit(self):
+        """大负载按 max_batch_bytes 分批（ColBERT 重行），行序与 id 全保留。
+
+        生产取证：593 行一次 insert 的 gRPC 消息 888MB 超 64MiB 上限被拒
+        （RESOURCE_EXHAUSTED），基元必须切块；分批后每次调用独立可成功。
+        """
+        client = FakeMilvusClient()
+        n = 300
+        dense = [np.ones(128, dtype=np.float32) for _ in range(n)]
+        sparse = [{i: 0.1} for i in range(n)]
+        colbert = [np.ones((4000, 4), dtype=np.float32) for _ in range(n)]  # ~40KB/行
+        ids = ms.insert_tri_vectors(
+            client, "c", dense, sparse, colbert,
+            metadata=[{"book": "药典"} for _ in range(n)],
+            ids=[f"r{i}" for i in range(n)],
+            max_batch_bytes=512 * 1024,
+        )
+        self.assertGreater(len(client._insert_batches), 1)
+        self.assertEqual(sum(len(b) for b in client._insert_batches), n)
+        self.assertTrue(all(len(b) <= 16 for b in client._insert_batches))
+        self.assertEqual(ids, [f"r{i}" for i in range(n)])
+        # 行内结构不受分批影响（分批只切 insert 调用）
+        rows = client.inserted["c"]
+        self.assertEqual(rows[0]["sparse"], {0: 0.1})
+        self.assertEqual(rows[0]["tokens"][0]["emb"], [1.0] * 4)
 
     def test_drop_collection_if_exists_idempotent(self):
         gone = FakeMilvusClient(has=True)

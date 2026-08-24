@@ -395,13 +395,21 @@ def insert_tri_vectors(
     colbert,
     metadata: Optional[List[Dict[str, Any]]] = None,
     ids: Optional[List[str]] = None,
+    max_batch_bytes: int = 16 * 1024 * 1024,
+    max_batch_rows: int = 4096,
 ) -> List[str]:
     """Insert tri-representation rows (row-dict payload, MilvusClient.insert).
 
     dense: list of vectors; sparse: list of {token_id: weight} dicts;
     colbert: list of per-row token-vector arrays (np.ndarray or list[list[float]]).
-    Per-row None sparse/colbert entries are stored as empty placeholders —
+    Per-row metadata/colbert entries are stored as empty placeholders —
     keeps the ColBERT backfill path open without a second re-ingest.
+
+    Payloads are split into batches so a single gRPC message stays under the
+    server's message-size ceiling: one full-document insert of 593 rows was
+    measured at 888MB (ColBERT tokens dominate) and rejected with
+    RESOURCE_EXHAUSTED (64MiB limit). Batches flush on max_batch_bytes
+    (estimate) or max_batch_rows, whichever comes first.
     """
     import uuid as _uuid
 
@@ -413,6 +421,20 @@ def insert_tri_vectors(
 
     def _vec(v) -> List[float]:
         return v.tolist() if isinstance(v, np.ndarray) else [float(x) for x in v]
+
+    def _estimate_bytes(row: dict) -> int:
+        """Rough serialized-size estimate for a row (float32 for vector payloads)."""
+        size = 8
+        for key, val in row.items():
+            if key == TRI_DENSE_FIELD:
+                size += 4 * len(val)
+            elif key == TRI_SPARSE_FIELD:
+                size += 12 * len(val) + 16
+            elif key == TRI_STRUCT_FIELD:
+                size += 16 * len(val) + sum(4 * len(t[TRI_STRUCT_VECTOR_FIELD]) for t in val)
+            else:
+                size += len(str(val)) + 16
+        return size
 
     rows = []
     for i in range(n):
@@ -427,8 +449,26 @@ def insert_tri_vectors(
             ),
             TRI_METADATA_FIELD: (metadata[i] if metadata and metadata[i] is not None else {}),
         })
-    client.insert(collection_name=collection_name, data=rows)
-    return [row["id"] for row in rows]
+
+    inserted_ids: List[str] = []
+    batch: List[dict] = []
+    batch_bytes = 0
+
+    def _flush() -> None:
+        nonlocal batch, batch_bytes
+        if not batch:
+            return
+        client.insert(collection_name=collection_name, data=batch)
+        inserted_ids.extend(row["id"] for row in batch)
+        batch, batch_bytes = [], 0
+
+    for row in rows:
+        batch.append(row)
+        batch_bytes += _estimate_bytes(row)
+        if len(batch) >= max_batch_rows or batch_bytes >= max_batch_bytes:
+            _flush()
+    _flush()
+    return inserted_ids
 
 
 def search_tri_leg(
