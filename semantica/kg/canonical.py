@@ -255,9 +255,10 @@ class AnchorResolver:
                         anchor_props: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Promote a PendingTerm into a ``:Canonical`` anchor node.
 
-        Creates/merges the anchor (labelled e.g. ``Herb``+``Canonical``)
-        and marks the PendingTerm ``status='promoted'`` with
-        ``promoted_to=canonical``. Edge re-hooking is the caller's job:
+        Marks the PendingTerm ``status='promoted'`` with
+        ``promoted_to=canonical`` first, then creates/merges the anchor
+        (labelled e.g. ``Herb``+``Canonical``) — a non-existent pending term
+        leaves no orphan anchor behind. Edge re-hooking is the caller's job:
         re-running the importer (or a backfill script) through ``land()``
         will now hit level 1/2 and rebuild edges onto the anchor.
         """
@@ -267,9 +268,6 @@ class AnchorResolver:
             raise ValueError("promote_pending 需要 canonical 正名")
         label = _label_for_term_type(term_type)
         labels = anchor_labels or [label, "Canonical"]
-        graph.merge_anchor(
-            labels=labels, name=canonical,
-            extra_props={"term_type": term_type, **(anchor_props or {})})
         result = graph.execute_query(
             "MATCH (p:PendingTerm {raw: $raw, term_type: $tt}) "
             "SET p.status = 'promoted', p.promoted_to = $canonical, "
@@ -277,7 +275,12 @@ class AnchorResolver:
             "RETURN p.raw AS raw, p.status AS status, p.promoted_to AS promoted_to",
             {"raw": raw, "tt": term_type, "canonical": canonical})
         records = result.get("records") or []
-        return records[0] if records else {"raw": raw, "status": "not_found"}
+        if not records:
+            return {"raw": raw, "status": "not_found"}
+        graph.merge_anchor(
+            labels=labels, name=canonical,
+            extra_props={"term_type": term_type, **(anchor_props or {})})
+        return records[0]
 
     def reject_pending(self, raw: str, term_type: str, reason: str = "") -> Dict[str, Any]:
         """Reject a PendingTerm (keep node + reason for audit; never delete)."""

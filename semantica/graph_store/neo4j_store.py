@@ -1110,12 +1110,17 @@ class Neo4jStore:
             safe_property = sanitize_identifier(match_property, "property key")
             props = dict(extra_props or {})
             on_match_set = on_match_set or []
+            # Property keys reach the query string unparameterized — sanitize
+            # like labels (GHSA-482h-hw99-h62p pattern).
+            props = {sanitize_identifier(k, "property key"): v for k, v in props.items()}
             params: Dict[str, Any] = {"name": name, **props}
 
             on_create = ", ".join(
                 [f"n.{safe_property} = $name"] + [f"n.{k} = ${k}" for k in props]
             )
-            on_match = ", ".join(f"n.{k} = ${k}" for k in on_match_set)
+            on_match = ", ".join(
+                f"n.{sanitize_identifier(k, 'property key')} = ${k}" for k in on_match_set
+            )
             on_match_clause = f" ON MATCH SET {on_match}" if on_match else ""
 
             query = (
