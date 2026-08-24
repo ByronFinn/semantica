@@ -1034,6 +1034,101 @@ class Neo4jStore:
         except Exception as e:
             raise ProcessingError(f"Failed to create index: {str(e)}")
 
+    def ensure_unique_constraint(
+        self,
+        label: str,
+        property_name: str = "name",
+        **options,
+    ) -> bool:
+        """
+        Ensure a uniqueness constraint exists on a node label property.
+
+        Canonical anchor layers (ADR-0015 companion) rely on name-uniqueness
+        so concurrent bulk imports converge onto one anchor node per term
+        instead of silently forking duplicates.
+
+        Args:
+            label: Node label
+            property_name: Property to constrain (default: name)
+            **options: Additional options (constraint_name)
+
+        Returns:
+            True if the constraint exists after the call
+        """
+        try:
+            safe_label = sanitize_identifier(label, "label")
+            safe_property = sanitize_identifier(property_name, "property key")
+            constraint_name = sanitize_identifier(
+                options.get("constraint_name", f"uniq_{safe_label}_{safe_property}"),
+                "constraint name",
+            )
+            query = (
+                f"CREATE CONSTRAINT {constraint_name} IF NOT EXISTS "
+                f"FOR (n:{safe_label}) REQUIRE n.{safe_property} IS UNIQUE"
+            )
+            with self.get_session() as session:
+                session.run(query)
+            self.logger.info(
+                f"Ensured unique constraint {constraint_name} on {label}.{property_name}"
+            )
+            return True
+        except Exception as e:
+            raise ProcessingError(f"Failed to ensure unique constraint: {str(e)}")
+
+    def merge_anchor(
+        self,
+        labels: List[str],
+        name: str,
+        match_property: str = "name",
+        extra_props: Optional[Dict[str, Any]] = None,
+        on_match_set: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Idempotently merge a canonical anchor node.
+
+        MERGE on the match property (default: name, guarded by a uniqueness
+        constraint created via :meth:`ensure_unique_constraint`); extra
+        properties are set on create, and the ``on_match_set`` property
+        keys are overwritten on subsequent merges (default: none — anchors
+        are write-once stable entities, only status-like fields such as
+        ``superseded_by`` should ever be updated in place).
+
+        Args:
+            labels: Node labels, e.g. ["Herb", "Canonical"]
+            name: Anchor name (unique key)
+            match_property: Unique match property (default: name)
+            extra_props: Properties set on create
+            on_match_set: Property keys from extra_props to also update on match
+
+        Returns:
+            Created/merged node properties
+        """
+        try:
+            safe_labels = ":".join(
+                sanitize_identifier(lbl, "label") for lbl in labels
+            )
+            safe_property = sanitize_identifier(match_property, "property key")
+            props = dict(extra_props or {})
+            on_match_set = on_match_set or []
+            params: Dict[str, Any] = {"name": name, **props}
+
+            on_create = ", ".join(
+                [f"n.{safe_property} = $name"] + [f"n.{k} = ${k}" for k in props]
+            )
+            on_match = ", ".join(f"n.{k} = ${k}" for k in on_match_set)
+            on_match_clause = f" ON MATCH SET {on_match}" if on_match else ""
+
+            query = (
+                f"MERGE (n:{safe_labels} {{{safe_property}: $name}}) "
+                f"ON CREATE SET {on_create}{on_match_clause} "
+                "RETURN properties(n) AS props"
+            )
+            result = self.execute_query(query, params)
+            records = result.get("records") or []
+            return records[0].get("props", {}) if records else {}
+        except Exception as e:
+            raise ProcessingError(f"Failed to merge anchor: {str(e)}")
+
     def get_stats(self) -> Dict[str, Any]:
         """Get database statistics."""
         try:
