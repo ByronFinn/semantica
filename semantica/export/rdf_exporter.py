@@ -69,6 +69,18 @@ def mint_relationship_iri(index: int, source: Any, target: Any) -> str:
     return f"{SEMANTICA_NS}rel_{index}_{digest}"
 
 
+def _escape_literal(value: Any) -> str:
+    """转义 RDF 引号字面量（turtle / RDF-XML 用，与 JSON-LD 同规则）。
+
+    实体 display 文本若含 ASCII `"`（如 PendingTerm 的 name=raw 带引号），
+    直接写入 ``semantica:text "{text}"`` 会得到 ``""冠心病心绞痛""`` 这类
+    非法 turtle（RDF/XML 同理）。转义 ``\\``/``"``/换行/制表，保持一致输出。
+    """
+    text = str(value if value is not None else "")
+    return (text.replace("\\", "\\\\").replace('"', '\\"')
+                .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t"))
+
+
 class NamespaceManager:
     """
     RDF namespace management engine.
@@ -394,7 +406,7 @@ class RDFSerializer:
                 entity_id = mint_entity_iri(entity_text)
 
             entity_type = entity.get("type", DEFAULT_ENTITY_TYPE)
-            text = entity.get("text") or entity.get("label", "")
+            text = _escape_literal(entity.get("text") or entity.get("label", ""))
             confidence = entity.get("confidence", 1.0)
 
             lines.append(f"<{entity_id}> a <{entity_type}> ;")
@@ -526,7 +538,7 @@ class RDFSerializer:
                 entity_id = mint_entity_iri(entity_text)
 
             entity_type = entity.get("type", DEFAULT_ENTITY_TYPE)
-            text = entity.get("text") or entity.get("label", "")
+            text = _escape_literal(entity.get("text") or entity.get("label", ""))
             confidence = entity.get("confidence", 1.0)
 
             # RDF/XML syntax: rdf:Description with rdf:about
