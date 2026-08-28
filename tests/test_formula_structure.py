@@ -46,10 +46,15 @@ def test_min_hits_blocks_casual_overlap():
     assert ms == []
 
 
-def test_ranking_deterministic_and_topn():
-    ms = match_formula_skeletons(RX_FULL, CANDIDATES, max_missing=1, top_n=2)
-    assert len(ms) <= 2
-    keys = [(-m.containment, -len(m.matched), m.formula) for m in ms]
+def test_ranking_deterministic_skeleton_size_first():
+    ms = match_formula_skeletons(RX_FULL, CANDIDATES, max_missing=1, top_n=5)
+    # 骨架规模优先：4 味整方（附子泻心汤/理中丸）居首，3 味三黄泻心汤随后，
+    # 半夏泻心汤缺 2 味（半夏+大枣）被 max_missing 正确排除，麻黄汤 1 味命中
+    # 被 min_hits 挡下
+    assert {ms[0].formula, ms[1].formula} == {"附子泻心汤", "理中丸"}
+    assert ms[2].formula == "三黄泻心汤"
+    assert all(m.formula not in ("半夏泻心汤", "麻黄汤") for m in ms)
+    keys = [(-len(m.matched), -m.containment, m.formula) for m in ms]
     assert keys == sorted(keys)
 
 

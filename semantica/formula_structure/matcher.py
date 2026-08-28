@@ -59,8 +59,10 @@ def match_formula_skeletons(
     equivalence: 溯源档药味等同映射（rx 侧写法 → 方剂组成侧写法），
         None 时用 DEFAULT_EQUIVALENCE；传 {} 关闭等同归一。
 
-    返回按（containment 降序, 命中味数降序, 方名升序）的 top_n——确定性、
-    可复现；调用方展示时必须保留"溯源档"分级口径，不得作为药证证据。
+    返回按（命中味数降序, containment 降序, 方名升序）的 top_n——确定性、
+    可复现。骨架规模优先：4 味整方（附子泻心汤）应压过 2 味偶然全中的
+    小方（大黄甘草汤），否则溯源榜被琐碎小方刷屏。
+    调用方展示时必须保留"溯源档"分级口径，不得作为药证证据。
     """
     eq = DEFAULT_EQUIVALENCE if equivalence is None else equivalence
     rx = {_canon(h, eq) for h in rx_herbs if h}
@@ -85,7 +87,7 @@ def match_formula_skeletons(
                 full=not missing,
             )
         )
-    out.sort(key=lambda m: (-m.containment, -len(m.matched), m.formula))
+    out.sort(key=lambda m: (-len(m.matched), -m.containment, m.formula))
     return out[:top_n]
 
 
