@@ -130,18 +130,18 @@ def test_record_pending_upsert_query_shape():
     assert params == {"raw": "白芍药", "tt": "herb", "sample": "REC-1", "batch": "med-verified-v6"}
 
 
-def test_promote_pending_merges_anchor_and_marks():
+def test_promote_pending_marks_first_then_merges_anchor():
     g = StubGraph(rows=[{"raw": "白芍药", "status": "promoted", "promoted_to": "白芍"}])
     res = make_resolver(graph=g)
     row = res.promote_pending("白芍药", "herb", "白芍", anchor_props={"standard": "药典2020"})
     assert row["status"] == "promoted"
-    anchor_call = g.queries[0]
+    q, params = g.queries[0]
+    assert "SET p.status = 'promoted', p.promoted_to = $canonical" in q
+    assert params["canonical"] == "白芍"
+    anchor_call = g.queries[1]
     assert anchor_call[0] == "merge_anchor"
     assert anchor_call[1]["labels"] == ["Herb", "Canonical"]
     assert anchor_call[1]["name"] == "白芍"
-    q, params = g.queries[1]
-    assert "SET p.status = 'promoted', p.promoted_to = $canonical" in q
-    assert params["canonical"] == "白芍"
 
 
 def test_promote_pending_requires_canonical():
