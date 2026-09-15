@@ -2,7 +2,10 @@ import type { CSSProperties } from "react";
 import { Loader2 } from "lucide-react";
 import { graph } from "../../store/graphStore";
 import { GRAPH_THEME, withAlpha } from "./graphTheme";
-import type { GraphSelectedNodeKind } from "./types";
+import type { FocusedUnavailableReason, GraphSelectedNodeKind } from "./types";
+import { focusedUnavailableReasonText } from "./graphViewCopy";
+import { MarkdownContentViewer } from "./MarkdownContentViewer";
+import type { MarkdownApplyResult } from "./markdownResourceClient";
 
 export type LinkPrediction = {
   target: string;
@@ -31,7 +34,7 @@ export interface GraphInspectorPanelProps {
   inspectableNodeId?: string | null;
   selectedNodeKind?: GraphSelectedNodeKind;
   canActivateFocused?: boolean;
-  focusedUnavailableReason?: string | null;
+  focusedUnavailableReason?: FocusedUnavailableReason | null;
   predictions: LinkPrediction[];
   predictionType: string;
   onPredictionTypeChange: (value: string) => void;
@@ -43,6 +46,8 @@ export interface GraphInspectorPanelProps {
   pathResult: PathResponse | null;
   onDownloadProvenance: (format: "json" | "markdown") => void;
   onFocusNode?: (nodeId: string) => void;
+  onMarkdownApplied?: (result: MarkdownApplyResult) => void;
+  onMarkdownDirtyChange?: (dirty: boolean) => void;
 }
 
 const PROVENANCE_KEYS = ["source", "source_url", "pmid", "pmids", "evidence", "provenance", "confidence"] as const;
@@ -303,6 +308,8 @@ export function GraphInspectorPanel({
   pathResult,
   onDownloadProvenance,
   onFocusNode,
+  onMarkdownApplied,
+  onMarkdownDirtyChange,
 }: GraphInspectorPanelProps) {
   if (!nodeId) {
     return (
@@ -340,8 +347,8 @@ export function GraphInspectorPanel({
           <div style={{ color: GRAPH_THEME.ui.text.strong, fontWeight: 600, marginBottom: 6 }}>Selected item is not directly inspectable in the current graph.</div>
           <div style={{ color: GRAPH_THEME.ui.text.body, fontSize: 13, lineHeight: 1.6 }}>
             {canActivateFocused
-              ? "Activate Focused mode to resolve this grouped selection to its canonical node."
-              : (focusedUnavailableReason ?? "Focused mode is unavailable for the current selection.")}
+              ? "Use Focus to resolve this grouped selection to its canonical node."
+              : focusedUnavailableReasonText(focusedUnavailableReason)}
           </div>
         </div>
       </aside>
@@ -364,6 +371,11 @@ export function GraphInspectorPanel({
     ([key]) =>
       !["x","y","valid_from","valid_until","content","source","source_url","pmid","pmids","evidence","provenance","confidence"].includes(key),
   );
+  const nodeContent = (typeof attributes?.content === "string" && attributes.content)
+    ? attributes.content
+    : (typeof properties.content === "string" && properties.content)
+    ? properties.content
+    : "";
 
   return (
     <aside style={{ padding: 24, display: "flex", flexDirection: "column", gap: 18 }}>
@@ -387,7 +399,7 @@ export function GraphInspectorPanel({
             <div style={{ color: GRAPH_THEME.ui.text.body, fontSize: 13, lineHeight: 1.6 }}>
               {canActivateFocused
                 ? `Canonical node available: ${effectiveNodeId}`
-                : (focusedUnavailableReason ?? "Focused mode is unavailable for the current selection.")}
+                : focusedUnavailableReasonText(focusedUnavailableReason)}
             </div>
           </div>
         ) : null}
@@ -407,6 +419,19 @@ export function GraphInspectorPanel({
           {attributes?.valid_until ? <div>until: {attributes.valid_until}</div> : null}
         </div>
       ) : null}
+
+      {/* Canonical nodes remain editable even when their current body is empty. */}
+      <details className="node-panel-collapse" open>
+        <summary className="node-panel-summary">Content</summary>
+        <div className="node-panel-body" style={{ marginTop: 8 }}>
+          <MarkdownContentViewer
+            content={nodeContent}
+            resource={{ kind: "context-node", id: effectiveNodeId }}
+            onApplied={onMarkdownApplied}
+            onDirtyChange={onMarkdownDirtyChange}
+          />
+        </div>
+      </details>
 
       {/* Actions */}
       <section style={sectionStyle}>

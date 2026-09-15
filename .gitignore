@@ -95,6 +95,7 @@ sample_data/
 *.test.sqlite
 *.test.sqlite3
 *.db-journal
+*.index.meta.json
 
 # Temporary files
 *.tmp
@@ -124,3 +125,6 @@ demo_out/
 # Local agent tool artifacts
 .kiro/
 .zcode/
+
+# Worktrees
+.worktrees/

@@ -145,14 +145,14 @@ class SHACLValidationReport:
         }
 
 
-def _run_pyshacl(
+def run_shacl_validation(
     data_graph_str: str,
     shacl_str: str,
     data_graph_format: str = "turtle",
     shacl_format: str = "turtle",
 ) -> SHACLValidationReport:
     """
-    Run pyshacl validation and return a structured SHACLValidationReport.
+    Run pySHACL validation and return a structured SHACLValidationReport.
 
     Args:
         data_graph_str: Serialized data graph string.
@@ -273,6 +273,21 @@ def _run_pyshacl(
     )
 
 
+def _run_pyshacl(
+    data_graph_str: str,
+    shacl_str: str,
+    data_graph_format: str = "turtle",
+    shacl_format: str = "turtle",
+) -> SHACLValidationReport:
+    """Backward-compatible alias for :func:`run_shacl_validation`."""
+    return run_shacl_validation(
+        data_graph_str,
+        shacl_str,
+        data_graph_format=data_graph_format,
+        shacl_format=shacl_format,
+    )
+
+
 def validate_shacl_graph(
     data_graph_str: str,
     shacl_str: str,
@@ -294,8 +309,9 @@ def validate_shacl_graph(
 
     Raises ImportError if pyshacl or rdflib are not installed.
     """
-    return _run_pyshacl(
-        data_graph_str, shacl_str,
+    return run_shacl_validation(
+        data_graph_str,
+        shacl_str,
         data_graph_format=data_graph_format,
         shacl_format=shacl_format,
     )
