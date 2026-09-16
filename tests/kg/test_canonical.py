@@ -135,6 +135,7 @@ def test_promote_pending_marks_first_then_merges_anchor():
     res = make_resolver(graph=g)
     row = res.promote_pending("白芍药", "herb", "白芍", anchor_props={"standard": "药典2020"})
     assert row["status"] == "promoted"
+    # review 定案顺序：先翻 pending 状态（防孤儿锚点）→ 再建锚点
     q, params = g.queries[0]
     assert "SET p.status = 'promoted', p.promoted_to = $canonical" in q
     assert params["canonical"] == "白芍"
@@ -217,3 +218,83 @@ def test_ensure_unique_constraint_query_shape():
     store.ensure_unique_constraint("Canonical", "name")
     assert ("CREATE CONSTRAINT uniq_Canonical_name IF NOT EXISTS "
             "FOR (n:Canonical) REQUIRE n.name IS UNIQUE") in captured["query"]
+
+
+# ---- PRD-0021 R3：rejected 粘滞 + 别名注册表泛化 + 归并回写 ----
+
+def test_record_pending_rejected_is_sticky():
+    """重导入已否决词不复活回 open（裁决终态粘滞）。"""
+    g = StubGraph(rows=[{"raw": "无名方", "status": "rejected", "freq": 2}])
+    res = make_resolver(graph=g)
+    row = res.record_pending("无名方", "formula")
+    assert row["status"] == "rejected"
+    q, _ = g.queries[0]
+    assert "IN ['promoted', 'rejected']" in q
+    assert "freq = coalesce(p.freq, 0) + 1" in q  # 频次照常累计（复审信号）
+
+
+def test_register_alias_all_term_types():
+    """别名注册表泛化：全部 term_type 可注册，identity/空值拒绝。"""
+    res = make_resolver()
+    assert res.register_alias("therapy_method", "健脾和胃法", "健脾和胃") is True
+    assert res.register_alias("syndrome", "气虚证", "气虚") is True
+    assert res.register_alias("disease", "胃脘痛", "胃痛") is True
+    assert res.land("健脾和胃法", "therapy_method").anchor == "健脾和胃"
+    # 拒绝项：identity、空值、未知类型
+    assert res.register_alias("herb", "白芍", "白芍") is False
+    assert res.register_alias("herb", "", "白芍") is False
+    assert res.register_alias("pulse", "浮脉", "浮") is False
+
+
+def test_load_aliases_from_graph_hydrates_l1():
+    """图内锚点 aliases 属性水合进 L1（归并回写后的再导入命中通道）。"""
+    g = StubGraph(rows=[
+        {"tt": "therapy_method", "name": "健脾", "aliases": ["健脾法", "助运"]},
+        {"tt": "syndrome", "name": "气虚", "aliases": ["气虚证"]},
+        {"tt": "herb", "name": "白芍", "aliases": ["白芍"]},  # identity 剔除
+    ])
+    res = make_resolver(graph=g)
+    n = res.load_aliases_from_graph()
+    assert n == 3
+    assert res.land("健脾法", "therapy_method").anchor == "健脾"
+    assert res.land("助运", "therapy_method").anchor == "健脾"
+    assert res.land("气虚证", "syndrome").anchor == "气虚"
+    q, _ = g.queries[0]
+    assert "a.aliases IS NOT NULL" in q
+
+
+def test_load_aliases_does_not_overwrite_existing():
+    """既有条目胜（种子归一表不被图状态覆写）。"""
+    g = StubGraph(rows=[{"tt": "herb", "name": "白芍", "aliases": ["元胡"]}])
+    res = make_resolver(graph=g)  # 元胡 → 延胡索（种子表既有）
+    res.load_aliases_from_graph()
+    assert res.land("元胡", "herb").anchor == "延胡索"
+
+
+def test_merge_pending_flips_and_writes_alias():
+    """归并：翻状态 + promoted_to + 锚点别名回写（幂等去重）。"""
+    g = StubGraph(rows=[{"raw": "健脾法", "status": "promoted", "promoted_to": "健脾", "anchor": "健脾"}])
+    res = make_resolver(graph=g)
+    out = res.merge_pending("健脾法", "therapy_method", "健脾")
+    assert out["status"] == "promoted" and out["promoted_to"] == "健脾"
+    q, params = g.queries[0]
+    assert "MATCH (a:Canonical {name: $canonical})" in q
+    assert "p.status = 'promoted', p.promoted_to = $canonical" in q
+    assert "$raw IN coalesce(a.aliases, [])" in q  # 幂等：已存在不重复追加
+    assert params == {"raw": "健脾法", "tt": "therapy_method", "canonical": "健脾"}
+
+
+def test_merge_pending_not_found_keeps_decision():
+    """锚点/pending 行缺失：不翻状态（决策不丢失），返回 not_found。"""
+    g = StubGraph(rows=[])
+    res = make_resolver(graph=g)
+    out = res.merge_pending("幽灵词", "therapy_method", "不存在的锚点")
+    assert out["status"] == "not_found"
+
+
+def test_merge_pending_requires_canonical():
+    import pytest
+
+    res = make_resolver(graph=StubGraph())
+    with pytest.raises(ValueError):
+        res.merge_pending("x", "therapy_method", "  ")

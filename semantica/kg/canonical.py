@@ -238,7 +238,10 @@ class AnchorResolver:
             "             p.samples = CASE WHEN $sample = '' OR $sample IN coalesce(p.samples, []) "
             "                              THEN coalesce(p.samples, []) "
             "                              ELSE coalesce(p.samples, []) + [$sample] END, "
-            "             p.status = CASE WHEN coalesce(p.status, 'open') = 'promoted' THEN 'promoted' ELSE 'open' END "
+            # 裁决终态粘滞（PRD-0021 R3）：promoted/rejected 不因重导入复活回 open；
+            # freq/samples 照常累计（rejected 且 freq 增长 = 天然复审信号）。
+            "             p.status = CASE WHEN coalesce(p.status, 'open') IN ['promoted', 'rejected'] "
+            "                             THEN p.status ELSE 'open' END "
             "WITH p LIMIT 1 "
             "RETURN p.raw AS raw, p.freq AS freq, p.status AS status, "
             "       p.samples[..5] AS samples",
@@ -293,12 +296,97 @@ class AnchorResolver:
         records = result.get("records") or []
         return records[0] if records else {"raw": raw, "status": "not_found"}
 
+    # ---- Alias registry (PRD-0021 R3: generalised beyond herb/symptom) ----
+
+    def register_alias(self, term_type: str, alias: str, canonical: str) -> bool:
+        """Register one in-memory alias mapping (level-1 landing source).
+
+        Registry is generalised to every TERM_TYPES entry (previously only
+        herb/symptom were populated by callers); alias == canonical or empty
+        values are ignored so promote-identity never pollutes L1.
+        """
+        alias, canonical = (alias or "").strip(), (canonical or "").strip()
+        if term_type not in TERM_TYPES or not alias or not canonical or alias == canonical:
+            return False
+        self.alias_map.setdefault(term_type, {})[alias] = canonical
+        return True
+
+    def load_aliases_from_graph(self, term_types: Optional[Iterable[str]] = None) -> int:
+        """Hydrate the alias registry from anchor ``aliases`` properties.
+
+        Source of truth for merged/adjudicated aliases (PRD-0021 R3): both
+        normative direct landing (GB/T 别名列) and merge adjudication write
+        ``aliases`` onto :Canonical anchors; importers reconstruct resolvers
+        from the graph so a merged spelling hits level 1 on re-import.
+        Existing entries win (setdefault semantics) — curated seed tables
+        are never overwritten by graph state.
+        """
+        graph = self._require_graph()
+        wanted = set(term_types) if term_types else set(TERM_TYPES)
+        result = graph.execute_query(
+            "MATCH (a:Canonical) WHERE a.aliases IS NOT NULL AND a.term_type IS NOT NULL "
+            "RETURN a.term_type AS tt, a.name AS name, a.aliases AS aliases",
+            {})
+        registered = 0
+        for row in result.get("records") or []:
+            tt = row.get("tt")
+            name = (row.get("name") or "").strip()
+            if tt not in wanted or not name:
+                continue
+            bucket = self.alias_map.setdefault(tt, {})
+            for alias in row.get("aliases") or []:
+                alias = (alias or "").strip()
+                if alias and alias != name and alias not in bucket:
+                    bucket[alias] = name
+                    registered += 1
+        if registered:
+            self.logger.info("锚点别名注册表水合：%d 条（graph → L1）", registered)
+        return registered
+
+    def merge_pending(self, raw: str, term_type: str, canonical: str) -> Dict[str, Any]:
+        """Merge a PendingTerm into an existing anchor + alias write-back.
+
+        Adjudication merge (PRD-0021 R3): flips the pending row to
+        ``status='promoted', promoted_to=canonical`` *and* appends the raw
+        spelling to the anchor's ``aliases`` list — unlike promote_pending
+        (which creates/merges the anchor), the target anchor must already
+        exist; a missing anchor aborts without flipping the pending row so
+        no decision is lost. Re-running is idempotent (alias dedup + same
+        terminal status).
+        """
+        graph = self._require_graph()
+        canonical = (canonical or "").strip()
+        if not canonical:
+            raise ValueError("merge_pending 需要 canonical 正名")
+        result = graph.execute_query(
+            "MATCH (a:Canonical {name: $canonical}) "
+            "MATCH (p:PendingTerm {raw: $raw, term_type: $tt}) "
+            "SET p.status = 'promoted', p.promoted_to = $canonical, p.resolved_at = datetime(), "
+            "    a.aliases = CASE WHEN $raw IN coalesce(a.aliases, []) OR $raw = a.name "
+            "                     THEN coalesce(a.aliases, []) "
+            "                     ELSE coalesce(a.aliases, []) + [$raw] END "
+            "RETURN p.raw AS raw, p.status AS status, p.promoted_to AS promoted_to, "
+            "       a.name AS anchor",
+            {"raw": raw, "tt": term_type, "canonical": canonical})
+        records = result.get("records") or []
+        if not records:
+            # 目标锚点不存在或 pending 行不存在：不翻状态（决策不丢失），
+            # 由调用方决定是否先建锚点（promote 路径）或报告错误。
+            return {"raw": raw, "status": "not_found", "canonical": canonical}
+        return records[0]
+
     def list_pending(self, term_type: Optional[str] = None, min_freq: int = 1,
-                     status: str = "open") -> List[Dict[str, Any]]:
-        """List pending terms (freq desc) for adjudication queue rendering."""
+                     status: str = "open", limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """List pending terms (freq desc) for adjudication queue rendering.
+
+        ``limit`` overrides the 500-row queue-rendering default (full-batch
+        adjudication passes a larger cap; PRD-0021 R2 全量跑批).
+        """
         graph = self._require_graph()
         where = ["p.freq >= $minFreq", "coalesce(p.status, 'open') = $status"]
-        params: Dict[str, Any] = {"minFreq": int(min_freq), "status": status}
+        params: Dict[str, Any] = {
+            "minFreq": int(min_freq), "status": status, "lim": int(limit or 500)
+        }
         if term_type:
             where.append("p.term_type = $tt")
             params["tt"] = term_type
@@ -307,7 +395,7 @@ class AnchorResolver:
             "RETURN p.raw AS raw, p.term_type AS term_type, p.freq AS freq, "
             "       p.samples AS samples, p.first_seen_batch AS first_seen_batch, "
             "       p.status AS status, p.promoted_to AS promoted_to "
-            "ORDER BY p.freq DESC, p.raw LIMIT 500",
+            "ORDER BY p.freq DESC, p.raw LIMIT $lim",
             params)
         return result.get("records") or []
 
