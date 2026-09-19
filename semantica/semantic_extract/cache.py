@@ -25,12 +25,12 @@ License: MIT
 """
 
 import copy
+import dataclasses
 import os
 import stat
 import time
 import hashlib
 import json
-import pickle
 import sqlite3
 import threading
 from abc import ABC, abstractmethod
@@ -44,6 +44,88 @@ from ..utils.logging import get_logger
 # The namespaces ExtractionCache manages. Kept as a module constant so backends
 # and get_stats() agree on the set without hard-coding it in several places.
 NAMESPACES = ("entities", "relations", "triplets")
+
+
+# ---------------------------------------------------------------------------
+# Default SQLite serialization codec (JSON-based, safe)
+#
+# The codec handles the three concrete value types stored by ExtractionCache:
+#   List[Entity], List[Relation], List[Triplet]
+#
+# Each dataclass is encoded as a plain JSON object tagged with a ``__type__``
+# key so the decoder can reconstruct the correct Python type unambiguously.
+# All field values (str, int, float, bool, None, dict-of-primitives) are
+# JSON-native, so no Python-specific serialisation is required.
+#
+# Values that are not one of the known tagged types (e.g. raw dicts or
+# primitives stored by tests) are round-tripped as-is.  Unknown ``__type__``
+# tags are returned as plain dicts so forward-compatibility is preserved.
+# ---------------------------------------------------------------------------
+
+def _encode_value(value: Any) -> Any:
+    """Recursively encode *value* to a JSON-safe representation.
+
+    Dataclass instances are represented as ``{"__type__": "<ClassName>",
+    **fields}``.  Lists are encoded element-wise.  Everything else is
+    returned unchanged (it must already be JSON-serialisable; callers that
+    pass non-serialisable values will get a ``TypeError`` from
+    ``json.dumps``, which ``SqliteCacheBackend.set`` already handles).
+    """
+    if isinstance(value, list):
+        return [_encode_value(item) for item in value]
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        # Build the tagged envelope manually (rather than dataclasses.asdict)
+        # so that nested dataclasses are also tagged, which the decoder needs.
+        encoded: Dict[str, Any] = {"__type__": type(value).__name__}
+        for f in dataclasses.fields(value):
+            encoded[f.name] = _encode_value(getattr(value, f.name))
+        return encoded
+    # Primitive or dict — returned as-is; json.dumps will catch anything
+    # non-serialisable and SqliteCacheBackend.set treats that as a skip.
+    return value
+
+
+def _decode_value(raw: Any) -> Any:
+    """Reconstruct Python objects from the JSON-decoded representation.
+
+    Tagged dicts (``__type__`` key) are converted back to the corresponding
+    dataclass.  Lists are decoded element-wise.  Everything else is returned
+    unchanged.
+    """
+    # Import here to avoid a circular import; types.py has no deps on cache.py.
+    from .types import Entity, Relation, Triplet  # noqa: PLC0415
+
+    if isinstance(raw, list):
+        return [_decode_value(item) for item in raw]
+    if isinstance(raw, dict) and "__type__" in raw:
+        type_tag = raw["__type__"]
+        fields = {k: _decode_value(v) for k, v in raw.items() if k != "__type__"}
+        if type_tag == "Entity":
+            return Entity(**fields)
+        if type_tag == "Relation":
+            return Relation(**fields)
+        if type_tag == "Triplet":
+            return Triplet(**fields)
+        # Unknown tag — return the original dict unchanged (forward-compat).
+        # Do NOT return fields: that would silently drop the ``__type__`` key.
+        return raw
+    # Primitive, plain dict without a type tag, etc.
+    return raw
+
+
+def _cache_serialize(value: Any) -> bytes:
+    """Default SQLite cache serializer.  Converts *value* to UTF-8 JSON bytes.
+
+    Safe to deserialize from an untrusted file because ``json.loads`` does
+    not execute arbitrary code.
+    """
+    return json.dumps(_encode_value(value), ensure_ascii=False).encode("utf-8")
+
+
+def _cache_deserialize(data: bytes) -> Any:
+    """Default SQLite cache deserializer.  Reconstructs Python objects from
+    the UTF-8 JSON bytes produced by :func:`_cache_serialize`."""
+    return _decode_value(json.loads(data.decode("utf-8")))
 
 
 class CacheItem:
@@ -202,21 +284,24 @@ class SqliteCacheBackend(CacheBackend):
     fresh process (CI job, notebook kernel, batch worker, extraction
     subprocess) reuses previous results instead of re-paying every LLM call.
 
-    **Trust model (read before enabling).** The database file is deserialized
-    back into this process on every read, and the default ``serializer`` is
-    ``pickle`` — so a cache file an attacker can influence is a code-execution
-    vector. Therefore:
+    **Default serialization.** Values are stored as UTF-8 JSON with a thin
+    tagged-envelope codec that reconstructs :class:`~semantica.semantic_extract.types.Entity`,
+    :class:`~semantica.semantic_extract.types.Relation`, and
+    :class:`~semantica.semantic_extract.types.Triplet` instances transparently.
+    JSON is not executable, so a tampered cache file cannot achieve arbitrary
+    code execution through the default deserializer.
 
-    - ``db_path`` MUST point at a **trusted, per-user, private** location.
-    - The file may hold **sensitive extraction results** in the clear.
-    - The default ``pickle`` serializer must only be used with a trusted file;
-      pass ``serializer`` / ``deserializer`` (e.g. ``json``) for untrusted or
-      shared locations.
+    **Custom serializer/deserializer.** Pass explicit ``serializer`` and
+    ``deserializer`` callables to override the default codec.  If you supply
+    ``pickle.dumps`` / ``pickle.loads`` you accept full responsibility for the
+    trust model: ``pickle`` deserializes arbitrary Python objects and a
+    file an attacker can write is a remote-code-execution vector.
 
-    To enforce this the backend creates the file **atomically** with ``0o600``
-    (``O_CREAT | O_EXCL``, no validate-then-open window) and, when reusing an
-    existing file, rejects symlinks, non-regular files, and files owned by
-    another user — raising so the caller falls back to the in-memory backend.
+    **File security.** The backend creates the database file **atomically**
+    with ``0o600`` (``O_CREAT | O_EXCL``, no validate-then-open window) and,
+    when reusing an existing file, rejects symlinks, non-regular files, and
+    files owned by another user — raising so the caller falls back to the
+    in-memory backend.
 
     Concurrency/reliability: TTL and LRU (by last access) mirror
     :class:`InMemoryBackend`. A ``busy_timeout`` plus bounded retry handles
@@ -236,8 +321,8 @@ class SqliteCacheBackend(CacheBackend):
         self,
         db_path: str,
         max_size: int = 1000,
-        serializer: Callable[[Any], bytes] = pickle.dumps,
-        deserializer: Callable[[bytes], Any] = pickle.loads,
+        serializer: Callable[[Any], bytes] = _cache_serialize,
+        deserializer: Callable[[bytes], Any] = _cache_deserialize,
         busy_timeout: float = 5.0,
         max_retries: int = 3,
         retry_backoff: float = 0.05,
