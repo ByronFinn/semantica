@@ -697,50 +697,135 @@ def test_custom_pickle_serializer_escape_hatch(tmp_path):
     backend.close()
 
 
+
 def test_metadata_dict_with_dunder_type_key_is_not_misreconstructed(tmp_path):
-    """A metadata dict that happens to contain a ``__type__`` key must NOT be
-    reconstructed as an Entity, Relation, or Triplet — it must round-trip as
-    a plain dict.
+    """Metadata dicts whose ``__type__`` value matches a recognised dataclass
+    name (``Entity``, ``Relation``, ``Triplet``) must NOT be reconstructed as
+    a dataclass — they must round-trip as plain dicts.  The containing cache
+    row must NOT be evicted (i.e. the result must not be a miss).
 
-    This guards against the codec accidentally treating user-supplied metadata
-    values as tagged envelopes.
+    This is the primary regression test for the codec-ambiguity fix: the
+    encoder must use a private marker key (``__dc__``) for its own envelopes
+    so that user-controlled ``__type__`` values in metadata are never
+    interpreted as dispatch signals.
     """
-    backend = SqliteCacheBackend(_db(tmp_path))
+    # Three independent backends, one per namespace, so each case is
+    # isolated and size assertions are unambiguous.
 
-    # An Entity whose metadata dict contains a "__type__" key with an unknown
-    # tag name.  The metadata must survive unchanged as a plain dict.
-    entities = [
-        _make_entity(
-            text="TestOrg",
-            label="ORG",
-            start_char=0,
-            end_char=7,
-            confidence=0.8,
-            metadata={
-                # Unknown __type__ tag inside metadata.
-                # Must NOT cause metadata to be reconstructed as a dataclass.
-                "__type__": "SomeExternalModel",
-                "schema_version": 2,
-            },
-        )
-    ]
-
-    backend.set("entities", "k", entities, ttl=None)
-    result = backend.get("entities", "k")
-    backend.close()
-
-    assert result is not None
-    assert len(result) == 1
-
-    e = result[0]
-    # The outer value must be reconstructed correctly as an Entity.
-    assert isinstance(e, Entity), "outer value must be reconstructed as Entity"
-    assert e.text == "TestOrg"
-
-    # The metadata dict must come back as a plain dict, not a dataclass.
-    assert isinstance(e.metadata, dict), "metadata must remain a plain dict"
-    # The __type__ key inside metadata must be preserved exactly — not stripped.
-    assert e.metadata["__type__"] == "SomeExternalModel", (
-        "__type__ key inside metadata must be preserved, not stripped"
+    # --- entities namespace: metadata.__type__ == "Entity" ---
+    b_ent = SqliteCacheBackend(_db(tmp_path) + ".ent")
+    b_ent.set(
+        "entities",
+        "k",
+        [
+            _make_entity(
+                text="Collision",
+                label="ORG",
+                start_char=0,
+                end_char=9,
+                confidence=0.7,
+                metadata={
+                    "__type__": "Entity",   # recognised name — must stay a dict
+                    "text": "inner",
+                    "label": "FAKE",
+                    "start_char": 0,
+                    "end_char": 5,
+                    "confidence": 0.5,
+                    "metadata": {},
+                    "extra": "should survive",
+                },
+            )
+        ],
+        ttl=None,
     )
-    assert e.metadata["schema_version"] == 2
+    result_ent = b_ent.get("entities", "k")
+    # Row must NOT have been evicted.
+    assert b_ent.size("entities") == 1, (
+        "row was evicted — Entity __type__ in metadata caused deserialization failure"
+    )
+    b_ent.close()
+
+    assert result_ent is not None, "__type__=Entity in metadata must not cause a miss"
+    assert len(result_ent) == 1
+    e = result_ent[0]
+    assert isinstance(e, Entity), "outer item must be an Entity"
+    assert e.text == "Collision"
+    assert isinstance(e.metadata, dict), "metadata must remain a plain dict"
+    assert e.metadata["__type__"] == "Entity", "__type__ key must be preserved"
+    assert e.metadata["extra"] == "should survive"
+
+    # --- relations namespace: metadata.__type__ == "Relation" ---
+    b_rel = SqliteCacheBackend(_db(tmp_path) + ".rel")
+    subj = _make_entity("A", "ORG", 0, 1, 0.9)
+    obj = _make_entity("B", "ORG", 2, 3, 0.8)
+    b_rel.set(
+        "relations",
+        "k",
+        [
+            Relation(
+                subject=subj,
+                predicate="knows",
+                object=obj,
+                confidence=0.9,
+                context="ctx",
+                metadata={
+                    "__type__": "Relation",  # recognised name — must stay a dict
+                    "subject": "not a real subject",
+                    "predicate": "collision",
+                    "note": "plain value",
+                },
+            )
+        ],
+        ttl=None,
+    )
+    result_rel = b_rel.get("relations", "k")
+    assert b_rel.size("relations") == 1, (
+        "row was evicted — Relation __type__ in metadata caused deserialization failure"
+    )
+    b_rel.close()
+
+    assert result_rel is not None, "__type__=Relation in metadata must not cause a miss"
+    assert len(result_rel) == 1
+    r = result_rel[0]
+    assert isinstance(r, Relation), "outer item must be a Relation"
+    assert r.predicate == "knows"
+    assert isinstance(r.metadata, dict), "metadata must remain a plain dict"
+    assert r.metadata["__type__"] == "Relation", "__type__ key must be preserved"
+    assert r.metadata["note"] == "plain value"
+
+    # --- triplets namespace: metadata.__type__ == "Triplet" ---
+    b_tri = SqliteCacheBackend(_db(tmp_path) + ".tri")
+    b_tri.set(
+        "triplets",
+        "k",
+        [
+            Triplet(
+                subject="S",
+                predicate="P",
+                object="O",
+                confidence=0.95,
+                metadata={
+                    "__type__": "Triplet",  # recognised name — must stay a dict
+                    "subject": "collision",
+                    "predicate": "collision",
+                    "object": "collision",
+                    "note": "plain value",
+                },
+            )
+        ],
+        ttl=None,
+    )
+    result_tri = b_tri.get("triplets", "k")
+    assert b_tri.size("triplets") == 1, (
+        "row was evicted — Triplet __type__ in metadata caused deserialization failure"
+    )
+    b_tri.close()
+
+    assert result_tri is not None, "__type__=Triplet in metadata must not cause a miss"
+    assert len(result_tri) == 1
+    t = result_tri[0]
+    assert isinstance(t, Triplet), "outer item must be a Triplet"
+    assert t.predicate == "P"
+    assert isinstance(t.metadata, dict), "metadata must remain a plain dict"
+    assert t.metadata["__type__"] == "Triplet", "__type__ key must be preserved"
+    assert t.metadata["note"] == "plain value"
