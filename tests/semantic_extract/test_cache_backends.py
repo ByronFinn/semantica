@@ -829,3 +829,83 @@ def test_metadata_dict_with_dunder_type_key_is_not_misreconstructed(tmp_path):
     assert isinstance(t.metadata, dict), "metadata must remain a plain dict"
     assert t.metadata["__type__"] == "Triplet", "__type__ key must be preserved"
     assert t.metadata["note"] == "plain value"
+
+
+def test_metadata_dict_with_dunder_dc_key_is_not_misreconstructed(tmp_path):
+    """A metadata dict containing a ``__dc__`` key must NOT be treated as a
+    codec envelope — it must round-trip as a plain dict with all keys intact.
+
+    The codec guard requires the *exact* two-key shape ``{"__dc__", "fields"}``
+    with ``fields`` being a dict.  Any dict that merely *contains* ``__dc__``
+    among other keys falls through to the plain-dict path unchanged.
+
+    This mirrors ``test_metadata_dict_with_dunder_type_key_is_not_misreconstructed``
+    but targets the current envelope marker rather than the legacy one.
+    """
+    # --- __dc__ without a "fields" peer (unknown-value case) ---
+    b1 = SqliteCacheBackend(_db(tmp_path) + ".dc1")
+    b1.set(
+        "entities",
+        "k",
+        [
+            _make_entity(
+                text="Probe1",
+                label="ORG",
+                start_char=0,
+                end_char=6,
+                confidence=0.8,
+                metadata={
+                    "__dc__": "note",       # present but no "fields" sibling
+                    "source": "manual",
+                },
+            )
+        ],
+        ttl=None,
+    )
+    r1 = b1.get("entities", "k")
+    assert b1.size("entities") == 1, (
+        "row evicted — __dc__ without 'fields' in metadata caused failure"
+    )
+    b1.close()
+
+    assert r1 is not None, "__dc__ without 'fields' in metadata must not cause a miss"
+    assert isinstance(r1[0], Entity)
+    assert r1[0].text == "Probe1"
+    assert isinstance(r1[0].metadata, dict), "metadata must remain a plain dict"
+    assert r1[0].metadata["__dc__"] == "note", "__dc__ key must be preserved"
+    assert r1[0].metadata["source"] == "manual"
+
+    # --- __dc__ + "fields" present but with additional keys (not exact shape) ---
+    b2 = SqliteCacheBackend(_db(tmp_path) + ".dc2")
+    b2.set(
+        "entities",
+        "k",
+        [
+            _make_entity(
+                text="Probe2",
+                label="ORG",
+                start_char=0,
+                end_char=6,
+                confidence=0.8,
+                metadata={
+                    "__dc__": "Entity",     # recognised name
+                    "fields": {"text": "inner"},
+                    "extra_key": "extra",   # third key breaks the exact-shape guard
+                },
+            )
+        ],
+        ttl=None,
+    )
+    r2 = b2.get("entities", "k")
+    assert b2.size("entities") == 1, (
+        "row evicted — __dc__+fields+extra_key in metadata caused failure"
+    )
+    b2.close()
+
+    assert r2 is not None, "__dc__+fields+extra_key in metadata must not cause a miss"
+    assert isinstance(r2[0], Entity)
+    assert r2[0].text == "Probe2"
+    assert isinstance(r2[0].metadata, dict), "metadata must remain a plain dict"
+    assert r2[0].metadata["__dc__"] == "Entity", "__dc__ key must be preserved"
+    assert r2[0].metadata["fields"] == {"text": "inner"}, "fields key must be preserved"
+    assert r2[0].metadata["extra_key"] == "extra"

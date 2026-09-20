@@ -40,6 +40,7 @@ from typing import Any, Callable, Dict, Optional
 from threading import Lock
 
 from ..utils.logging import get_logger
+from .types import Entity, Relation, Triplet
 
 # The namespaces ExtractionCache manages. Kept as a module constant so backends
 # and get_stats() agree on the set without hard-coding it in several places.
@@ -52,12 +53,16 @@ NAMESPACES = ("entities", "relations", "triplets")
 # The codec handles the three concrete value types stored by ExtractionCache:
 #   List[Entity], List[Relation], List[Triplet]
 #
-# Dataclass instances are encoded as:
+# Dataclass instances are encoded as the *exact* two-key envelope:
 #   {"__dc__": "<ClassName>", "fields": {<field>: <encoded-value>, ...}}
 #
-# The ``__dc__`` key is a codec-internal marker that is never present in user
-# data (metadata dicts are arbitrary and may carry any key, including
-# ``__type__``, so that key must not be treated as a dispatch signal).
+# A dict is treated as a codec envelope **only** when it has exactly these
+# two keys and "fields" is itself a dict.  Any other dict — including one
+# that merely happens to carry a ``__dc__`` key among other keys — falls
+# through to the plain-dict path unchanged.  This means user metadata can
+# freely contain ``__dc__``, ``__type__``, or any other key without risk of
+# silent reconstruction or data loss.
+#
 # Plain dicts are encoded by recursing into their values without adding any
 # wrapper, so their keys are never mistaken for envelope markers.
 #
@@ -65,15 +70,19 @@ NAMESPACES = ("entities", "relations", "triplets")
 # JSON-native, so no Python-specific serialisation is required.
 # ---------------------------------------------------------------------------
 
+# Sentinel frozenset used by _decode_value to recognise the exact envelope shape.
+_ENVELOPE_KEYS = frozenset({"__dc__", "fields"})
+
+
 def _encode_value(value: Any) -> Any:
     """Recursively encode *value* to a JSON-safe representation.
 
-    Dataclass instances are represented as
+    Dataclass instances are represented as the exact two-key envelope
     ``{"__dc__": "<ClassName>", "fields": {…}}``.
     Lists are encoded element-wise.
     Plain dicts are encoded by recursing into their values — no wrapper is
-    added, so user metadata keys (including ``__type__``) are never
-    reinterpreted by the decoder.
+    added, so user metadata keys (including ``__dc__`` or ``__type__``) are
+    never reinterpreted by the decoder.
     Everything else is returned unchanged (it must already be
     JSON-serialisable; non-serialisable values surface as a ``TypeError``
     from ``json.dumps``, which ``SqliteCacheBackend.set`` already handles).
@@ -81,9 +90,8 @@ def _encode_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_encode_value(item) for item in value]
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        # Encode as a two-key envelope: the marker ``__dc__`` identifies this
-        # as a codec-managed dataclass, and ``fields`` carries the encoded
-        # field values.  Nesting is handled by recursing into each field.
+        # Encode as the exact two-key envelope so _decode_value can
+        # unambiguously distinguish codec output from user data.
         return {
             "__dc__": type(value).__name__,
             "fields": {
@@ -100,37 +108,53 @@ def _encode_value(value: Any) -> Any:
     return value
 
 
+def _is_envelope(raw: dict) -> bool:
+    """Return True iff *raw* is the exact two-key dataclass envelope written
+    by :func:`_encode_value`.
+
+    The guard requires **all** of:
+    - exactly two keys: ``__dc__`` and ``fields``
+    - ``fields`` is a ``dict``
+
+    Any dict with more keys (or without ``fields`` being a dict) is treated
+    as ordinary user data, even if it contains a ``__dc__`` key.
+    """
+    return (
+        raw.keys() == _ENVELOPE_KEYS
+        and isinstance(raw.get("fields"), dict)
+    )
+
+
 def _decode_value(raw: Any) -> Any:
     """Reconstruct Python objects from the JSON-decoded representation.
 
-    Dicts carrying the ``__dc__`` key are dataclass envelopes written by
+    Dicts that satisfy the exact envelope shape ``{"__dc__": str,
+    "fields": dict}`` (and nothing else) are dataclass envelopes written by
     :func:`_encode_value` and are reconstructed as the corresponding type.
+    Any dict that merely *contains* a ``__dc__`` key among other keys falls
+    through to the plain-dict path and is returned with all keys intact.
     Lists are decoded element-wise.
-    Everything else — including plain dicts with any user-defined keys such
-    as ``__type__`` — is returned unchanged.
+    Primitives are returned as-is.
     """
-    # Import here to avoid a circular import; types.py has no deps on cache.py.
-    from .types import Entity, Relation, Triplet  # noqa: PLC0415
-
     if isinstance(raw, list):
         return [_decode_value(item) for item in raw]
-    if isinstance(raw, dict) and "__dc__" in raw:
-        # This dict was produced by the encoder; reconstruct the dataclass.
+    if isinstance(raw, dict) and _is_envelope(raw):
+        # Exact codec envelope — reconstruct the dataclass.
         type_tag = raw["__dc__"]
-        fields = {k: _decode_value(v) for k, v in raw.get("fields", {}).items()}
+        fields = {k: _decode_value(v) for k, v in raw["fields"].items()}
         if type_tag == "Entity":
             return Entity(**fields)
         if type_tag == "Relation":
             return Relation(**fields)
         if type_tag == "Triplet":
             return Triplet(**fields)
-        # Unknown tag from a future version — return the decoded fields dict
-        # so callers get the data rather than an opaque envelope.
+        # Unknown tag from a future codec version — return the decoded fields
+        # dict so callers get the data rather than an opaque envelope.
         return fields
     if isinstance(raw, dict):
-        # Plain dict (e.g. user metadata): recurse into values so any
-        # dataclass envelopes nested inside are decoded, but preserve all
-        # keys including ``__type__`` unchanged.
+        # Plain dict (e.g. user metadata): recurse into values so any codec
+        # envelopes nested inside are decoded, but preserve all keys —
+        # including ``__dc__`` or ``__type__`` — unchanged.
         return {k: _decode_value(v) for k, v in raw.items()}
     # Primitive (str, int, float, bool, None) — returned as-is.
     return raw
@@ -147,7 +171,13 @@ def _cache_serialize(value: Any) -> bytes:
 
 def _cache_deserialize(data: bytes) -> Any:
     """Default SQLite cache deserializer.  Reconstructs Python objects from
-    the UTF-8 JSON bytes produced by :func:`_cache_serialize`."""
+    the UTF-8 JSON bytes produced by :func:`_cache_serialize`.
+
+    Note: JSON has no tuple type, so any tuple-valued metadata field is
+    returned as a list after a round-trip.  All values stored by the
+    production extraction pipeline are str/int/float/bool/None, so this
+    does not affect normal operation.
+    """
     return _decode_value(json.loads(data.decode("utf-8")))
 
 
