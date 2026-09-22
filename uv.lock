@@ -726,6 +726,20 @@ wheels = [
 ]
 
 [[package]]
+name = "cattrs"
+version = "26.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs" },
+    { name = "exceptiongroup", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d6/b2/42f4524e5479b090040b5fd8bb316dd8c65a079bb6492494ce2079dc91be/cattrs-26.2.0.tar.gz", hash = "sha256:3cf49f69df8326bcf17a3cb3d3d3ec4a856858fe3a7473746c9044c317d3ba55", size = 524993, upload-time = "2026-09-06T20:31:58.055Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f5/4d/6b8460462012a52075ba97932197f8c141be71b8e5f7e918af08ee73424b/cattrs-26.2.0-py3-none-any.whl", hash = "sha256:c680f17cd1df3a1c038ad1db8d90a9c595568cc54c4e8098e7ceb8d7b9bd826b", size = 74830, upload-time = "2026-09-06T20:31:56.327Z" },
+]
+
+[[package]]
 name = "celery"
 version = "5.6.3"
 source = { registry = "https://pypi.org/simple" }
@@ -4041,6 +4055,21 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/3a/05/a1dae3dffd1116099471c643b8924f5aa6524411dc6c63fdae648c4f1aca/loguru-0.7.3.tar.gz", hash = "sha256:19480589e77d47b8d85b2c827ad95d49bf31b0dcde16593892eb51dd18706eb6", size = 63559, upload-time = "2024-12-06T11:20:56.608Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0c/29/0348de65b8cc732daa3e33e67806420b2ae89bdce2b04af740289c5c6c8c/loguru-0.7.3-py3-none-any.whl", hash = "sha256:31a33c10c8e1e10422bfd431aeb5d351c7cf7fa671e3c4df004162264b28220c", size = 61595, upload-time = "2024-12-06T11:20:54.538Z" },
+]
+
+[[package]]
+name = "looker-sdk"
+version = "26.12.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs" },
+    { name = "cattrs" },
+    { name = "requests" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7c/b2/2e2aba48b687a0237bf1d84d0e3ea99c433232b5ae662369ec8439793987/looker_sdk-26.12.0.tar.gz", hash = "sha256:4dd327927b541e322de8bee1820cf1ce212c1883dc51b8bc098efe12c314e3f5", size = 240874, upload-time = "2026-07-13T20:37:32.284Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ea/a4/94b4c13e8ddc705b0607287f4e778a1cb54aab00d330350dd85dab3310a6/looker_sdk-26.12.0-py3-none-any.whl", hash = "sha256:c765f95c01ceaf3c162a779c4794dfaeb8696b4e1e16a81fb8bb1f253ce74b57", size = 262578, upload-time = "2026-07-13T20:37:30.791Z" },
 ]
 
 [[package]]
@@ -8344,6 +8373,9 @@ ingest-arrow = [
 ingest-git = [
     { name = "gitpython" },
 ]
+ingest-looker = [
+    { name = "looker-sdk" },
+]
 ingest-parquet = [
     { name = "pyarrow" },
 ]
@@ -8542,6 +8574,7 @@ requires-dist = [
     { name = "librosa", marker = "extra == 'media'", specifier = ">=0.9.0" },
     { name = "litellm", marker = "extra == 'llm-litellm'", specifier = ">=1.83.9" },
     { name = "loguru", specifier = ">=0.7.3" },
+    { name = "looker-sdk", marker = "extra == 'ingest-looker'", specifier = ">=24.0.0" },
     { name = "lxml", marker = "extra == 'documents'", specifier = ">=6.1.1" },
     { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.9.4" },
     { name = "neo4j", marker = "extra == 'graph-amazon-neptune'", specifier = ">=5.0.0" },
@@ -8625,7 +8658,7 @@ requires-dist = [
     { name = "weaviate-client", marker = "extra == 'vectorstore-weaviate'", specifier = ">=4.0.0" },
     { name = "websockets", marker = "extra == 'explorer'", specifier = ">=15.0.1" },
 ]
-provides-extras = ["llm-openai", "llm-groq", "llm-gemini", "llm-anthropic", "llm-ollama", "llm-deepseek", "llm-novita", "llm-litellm", "llm-instructor", "llm-all", "documents", "parse-docling", "parse-pdf", "shacl", "db-snowflake", "db-databricks", "db-arrow", "db-salesforce", "db-redshift", "db-bigquery", "ingest-parquet", "ingest-arrow", "ingest-sap", "ingest-airflow", "ingest-git", "db-all", "models-huggingface", "embeddings-local", "nlp-spacy", "graph-neo4j", "graph-falkordb", "graph-amazon-neptune", "graph-apache-age", "graph-embeddings", "graph-all", "tripletstore-oxigraph", "vectorstore-faiss", "vectorstore-qdrant", "vectorstore-weaviate", "vectorstore-pinecone", "vectorstore-milvus", "vectorstore-pgvector", "vectorstore-sqlite", "vectorstore-all", "infra", "cloud", "monitoring", "viz", "media", "gpu", "agno", "langchain", "google-adk", "open-ontologies", "watch", "split-tiktoken", "split-community", "split-topic", "split-all", "explorer", "explorer-lite", "all"]
+provides-extras = ["llm-openai", "llm-groq", "llm-gemini", "llm-anthropic", "llm-ollama", "llm-deepseek", "llm-novita", "llm-litellm", "llm-instructor", "llm-all", "documents", "parse-docling", "parse-pdf", "shacl", "db-snowflake", "db-databricks", "db-arrow", "db-salesforce", "db-redshift", "db-bigquery", "ingest-looker", "ingest-parquet", "ingest-arrow", "ingest-sap", "ingest-airflow", "ingest-git", "db-all", "models-huggingface", "embeddings-local", "nlp-spacy", "graph-neo4j", "graph-falkordb", "graph-amazon-neptune", "graph-apache-age", "graph-embeddings", "graph-all", "tripletstore-oxigraph", "vectorstore-faiss", "vectorstore-qdrant", "vectorstore-weaviate", "vectorstore-pinecone", "vectorstore-milvus", "vectorstore-pgvector", "vectorstore-sqlite", "vectorstore-all", "infra", "cloud", "monitoring", "viz", "media", "gpu", "agno", "langchain", "google-adk", "open-ontologies", "watch", "split-tiktoken", "split-community", "split-topic", "split-all", "explorer", "explorer-lite", "all"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -273,6 +273,10 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "BigQueryIngestor": (".bigquery_ingestor", "BigQueryIngestor"),
     "BigQueryData": (".bigquery_ingestor", "BigQueryData"),
     "BigQueryConnector": (".bigquery_ingestor", "BigQueryConnector"),
+    # Looker ingestion
+    "LookerIngestor": (".looker_ingestor", "LookerIngestor"),
+    "LookerData": (".looker_ingestor", "LookerData"),
+    "LookerConnector": (".looker_ingestor", "LookerConnector"),
 }
 
 _OPTIONAL_DEPENDENCY_MESSAGES = {
@@ -328,6 +332,10 @@ _OPTIONAL_DEPENDENCY_MESSAGES = {
         "BigQuery ingestion requires optional dependency 'google-cloud-bigquery'. "
         "Install it with: pip install 'semantica[db-bigquery]'"
     ),
+    ".looker_ingestor": (
+        "Looker ingestion requires optional dependency 'looker-sdk'. "
+        "Install it with: pip install 'semantica[ingest-looker]'"
+    ),
 }
 
 
@@ -354,6 +362,7 @@ def __getattr__(name: str) -> Any:
                     "lxml",
                     "redshift_connector",
                     "google",
+                    "looker_sdk",
                 )
             )
         ):
@@ -410,6 +419,15 @@ def __getattr__(name: str) -> Any:
         "BigQueryConnector",
     }:
         if not getattr(module, "BIGQUERY_AVAILABLE", True):
+            message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
+            if message:
+                raise ImportError(message)
+
+    if module_name == ".looker_ingestor" and name in {
+        "LookerIngestor",
+        "LookerConnector",
+    }:
+        if not getattr(module, "LOOKER_AVAILABLE", True):
             message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
             if message:
                 raise ImportError(message)
@@ -520,6 +538,10 @@ __all__ = [
     "BigQueryIngestor",
     "BigQueryData",
     "BigQueryConnector",
+    # Looker ingestion
+    "LookerIngestor",
+    "LookerData",
+    "LookerConnector",
     # Registry and Methods
     "MethodRegistry",
     "method_registry",
