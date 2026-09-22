@@ -1492,18 +1492,22 @@ app = create_app(session=GraphSession(graph), agent_memory=memory)
 The Memories workspace is shown only when `agent_memory` is provided. Apply
 updates the supplied runtime object; it does not add disk persistence.
 
-## What's New in v0.6.8
+## What's New in v0.7.0
 
-**Every release from here on is cryptographically signed** — the build now runs SLSA build-provenance attestation plus Sigstore signing, and `.sigstore.json` bundles ship alongside the wheel/sdist on every GitHub Release, closing the OpenSSF Scorecard Signed-Releases gap. Beyond that, this is a large fix-and-hardening release plus a batch of vector-store and LLM-provider additions:
+**Core install just got 4x lighter.** Direct dependencies dropped from 44 to 22 packages — heavy ML/NLP, visualization, document-parsing, and ingestion libraries (`torch`, `spacy`, `sentence-transformers`, `matplotlib`, `faiss-cpu`, `python-docx`, and more) moved into granular optional extras. `pip install "semantica[all]"` keeps the old fully-bundled behavior. This is also the first release requiring **Python 3.10+** (3.8/3.9 support dropped; 3.14 not yet supported), with a committed `uv.lock` for reproducible dev installs:
 
-- **Vector store gains real enumeration**: `scan_vectors()`/`iter_vectors()` land across FAISS, SQLiteVec, PgVector, Qdrant, Weaviate, and Milvus (each via the pagination primitive its API actually supports), making `semantica store migrate` functional between backends for the first time; Weaviate also gains `delete_vectors()` for `ErasureCoordinator` support
-- **`semantica.llms` gains first-class `Anthropic`, `Gemini`, `Ollama`, `DeepSeek`, and `Novita` provider wrappers**, matching the existing `Groq`/`OpenAI` pattern
-- **Ontology package gains a deterministic, CI-friendly quality gate** for ontologies and knowledge graphs, plus first-class Google ADK integration and a Salesforce ingestor
-- **Explorer's read-only Markdown viewer becomes a full editor** for live `ContextGraph` nodes and host-supplied `AgentMemory` items
-- **`ErasureCoordinator`** completes the erasure workflow `purge_node()` only started, so a purged entity no longer survives verbatim in `AgentMemory` or as an embedding
-- **Security**: 12 Dependabot `aiohttp` alerts, 5 HIGH-severity Trivy container findings, and 2 npm advisories all resolved
+- **Hierarchical Community GraphRAG**: multi-level Louvain/Leiden community detection, LLM-summarized community reports, and global Map-Reduce + DRIFT hybrid search (`ContextRetriever(mode="global"|"drift"|"hybrid")`, new `semantica kg global`/`semantica kg drift` CLI commands) — 193 new tests
+- **Six new data connectors**: BigQuery, Amazon Redshift, Power BI, Apache Airflow, plus line-delimited JSON (`.jsonl`/`.ndjson`) ingestion
+- **Schema-guided extraction**: `SchemaValidator` checks extraction output against a domain ontology, and `bootstrap_schema` induces a draft ontology from extracted data to ratify by hand
+- **Source-aware truth maintenance and trust tiers**: a new `TruthMaintenanceSession` tracks fact support and retractions for non-recursive rules, `ContextRetriever` can filter retrieved context by active/supported facts, and graph facts now get a corroboration-based trust tier (quarantine/bronze/silver/gold)
+- **Persistent extraction cache**: `ExtractionCache` gains a pluggable `CacheBackend`, including a new SQLite backend so cached LLM extraction results survive a process restart
+- **MCP gains semantic retrieval tools** (`store_document`/`retrieve_context`/`update_document`/`remove_document`) and 6 bug fixes across provenance, causal-chain serialization, and export handlers
+- **`SPARQLReasoner.execute_query` runs real queries** against the configured triplet store or an in-memory `rdflib.Graph`, instead of the previous no-op
+- **Security**: removed the `crewai` extra to close unpatched `chromadb`/`json-repair` CVEs, fixed a Neptune credential-logging leak, and corrected a pip-audit CVE-alias matching gap
 
-Also fixes 35 correctness bugs (Python 3.9 install breakage, FAISS save/load metadata loss, `semantica ingest`'s silent no-op against a configured graph store, MCP persistence, Explorer graph rendering, ontology property-collision handling, and more) and a large batch of documentation corrections across the site.
+**Breaking changes**: `Entity.confidence` is now `Optional[float]` (was `float = 1.0`) so unmeasured confidence is no longer indistinguishable from a perfect score; `PolicyEngine.check_compliance` now raises `ProcessingError` (previously returned `False`) for rules it cannot evaluate; the `dev` extra is gone in favor of a PEP 735 dependency group; `semantica[crewai]` no longer installs `crewai` automatically.
+
+Also fixes 40+ correctness bugs (in-memory vector-ID reuse corrupting live vectors, FAISS/Qdrant/Milvus vector-store gaps, Explorer temporal-scrubber and ontology-linking bugs, CLI commands calling nonexistent APIs, and more) and a large batch of documentation corrections across the site.
 
 → [Full release notes](RELEASE_NOTES.md) · [Changelog](CHANGELOG.md)
 

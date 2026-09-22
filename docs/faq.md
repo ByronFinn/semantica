@@ -17,7 +17,7 @@ icon: "circle-question"
 | API key required? | Optional: pattern extraction works with no keys |
 | Works with LangChain / LlamaIndex? | Yes: Semantica is a layer on top, not a replacement |
 | Production-ready? | Yes: 1,000+ tests, security fixes shipped in every release (see [CHANGELOG](https://github.com/semantica-agi/semantica/blob/main/CHANGELOG.md)) |
-| Latest version? | **v0.6.8** (September 2026) |
+| Latest version? | **v0.7.0** (September 2026) |
 | Local LLMs? | Yes: Ollama via LiteLLM, HuggingFaceLLM for air-gapped |
 
 
@@ -70,9 +70,9 @@ Yes: MIT licensed, no vendor lock-in, no paywalled features. Some capabilities r
 
 <Accordion title="What's the latest version?" icon="star">
 
-**v0.6.8**: released September 2026.
+**v0.7.0**: released September 2026.
 
-Highlights: every release is now cryptographically signed (SLSA build provenance + Sigstore, closing the OpenSSF Scorecard Signed-Releases gap), real vector-store enumeration (`scan_vectors()`/`iter_vectors()`) across FAISS/SQLiteVec/PgVector/Qdrant/Weaviate/Milvus making `store migrate` functional, first-class Anthropic/Gemini/Ollama/DeepSeek/Novita LLM provider wrappers, a CI-friendly ontology quality gate, and 35 correctness fixes. The 0.6.x line also added first-class LangChain and CrewAI support and the Semantica RDF vocabulary with deterministic IRIs. See the [CHANGELOG](https://github.com/semantica-agi/semantica/blob/main/CHANGELOG.md) for the full history.
+Highlights: core install dependencies cut from 44 to 22 packages via optional extras (`pip install "semantica[all]"` for the old bundled behavior), Hierarchical Community GraphRAG (multi-level community detection, summarized reports, global/DRIFT hybrid search), six new data connectors (BigQuery, Redshift, Power BI, Airflow, plus JSONL ingestion), schema-guided extraction validation, source-aware truth maintenance with trust tiers for graph facts, a persistent SQLite extraction-cache backend, and 40+ correctness fixes. Requires Python 3.10+ (3.8/3.9 dropped). Two breaking changes: `Entity.confidence` is now `Optional[float]`, and `PolicyEngine.check_compliance` raises `ProcessingError` instead of returning `False` for unevaluable rules. The 0.6.x line also added every release being cryptographically signed (SLSA + Sigstore), real vector-store enumeration, and first-class Anthropic/Gemini/Ollama/DeepSeek/Novita LLM provider wrappers. See the [CHANGELOG](https://github.com/semantica-agi/semantica/blob/main/CHANGELOG.md) for the full history.
 
 ```bash
 pip install --upgrade semantica
