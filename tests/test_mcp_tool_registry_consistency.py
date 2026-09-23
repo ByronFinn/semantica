@@ -95,43 +95,70 @@ class TestExportGraphSchemaEnum(unittest.TestCase):
             f"Missing previously-declared formats: {existing - enum_set}",
         )
 
-    def test_enum_total_count_is_nine(self):
-        """7 original + graphml + parquet = 9."""
-        self.assertEqual(len(self._export_graph_enum()), 9)
+    def test_enum_total_count_is_ten(self):
+        """7 original + graphml + parquet + jsonld alias = 10."""
+        self.assertEqual(len(self._export_graph_enum()), 10)
 
     def test_export_graph_schema_enum_matches_handler_supported_formats(self):
-        """Schema enum and the handler's own accepted-format set must agree,
-        so tools/list and runtime behaviour stay in sync."""
-        from semantica_mcp.mcp.tools.export import handle_export_graph
-        import semantica_mcp.mcp.session as _session
-        from semantica_mcp.mcp.tools import TOOL_DEFINITIONS
+        """Schema enum and the handler's accepted-format set must agree in
+        both directions:
 
-        # Minimal graph for the handler to process without error.
+        - every format in the schema enum is accepted by the handler
+          (no schema entry produces "Unsupported format");
+        - every format accepted by the handler is present in the schema enum
+          (no silently-reachable format is hidden from MCP clients).
+
+        The authoritative handler-side set is derived from the handler's own
+        _FORMAT_ALIASES mapping (RDF inputs) plus the four non-RDF branches
+        (json, csv, graphml, parquet).
+        """
+        from semantica_mcp.mcp.tools.export import _FORMAT_ALIASES, handle_export_graph
+        import semantica_mcp.mcp.session as _session
+
+        # Derive the authoritative handler-accepted set from the implementation,
+        # not from a hard-coded list that could drift.
+        handler_accepted = {"json", "csv", "graphml", "parquet"} | set(_FORMAT_ALIASES.keys())
+
+        # Set up a minimal graph so the handler can actually run each branch.
+        # Separate the environmental check from the graph mutation so that
+        # cleanup is guaranteed regardless of where setup fails.
         try:
             from semantica.context.context_graph import ContextGraph
-            orig = _session._graph
-            _session._graph = ContextGraph()
-            _session._graph.add_node("n1", node_type="entity")
-        except Exception:
+        except ImportError:
             self.skipTest("ContextGraph not importable in this environment")
 
-        schema_enum = set(self._export_graph_enum())
+        orig = _session._graph
         try:
-            # Every value in the schema enum must not produce an
-            # "Unsupported format" error from the handler.
+            _session._graph = ContextGraph()
+            _session._graph.add_node("n1", node_type="entity")
+
+            schema_enum = set(self._export_graph_enum())
+
+            # Direction 1: every schema-declared format must be accepted by the handler.
             for fmt in schema_enum:
-                with self.subTest(fmt=fmt):
+                with self.subTest(direction="schema→handler", fmt=fmt):
                     result = handle_export_graph({"format": fmt})
                     if "error" in result:
-                        # pyarrow/graphml optional deps may be absent; that
-                        # produces a graceful error but not an "unsupported"
-                        # one — the schema claim is still correct.
+                        # Optional-dependency errors (pyarrow absent, GraphML
+                        # library absent) are graceful — the format IS handled,
+                        # just unavailable at runtime. Only "Unsupported format"
+                        # means the handler truly does not recognise the value.
                         self.assertNotIn(
                             "Unsupported format",
                             result["error"],
                             f"Format {fmt!r} is in the schema enum but the "
                             f"handler says it is unsupported: {result['error']}",
                         )
+
+            # Direction 2: every handler-accepted format must be in the schema enum.
+            missing_from_schema = handler_accepted - schema_enum
+            self.assertEqual(
+                missing_from_schema,
+                set(),
+                f"The handler accepts format(s) that are absent from the "
+                f"EXPORT_GRAPH schema enum: {missing_from_schema}. "
+                f"MCP clients inspecting the schema will not discover them.",
+            )
         finally:
             _session._graph = orig
 
