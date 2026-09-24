@@ -460,8 +460,12 @@ class GraphAnalytics:
             """
             params = {"label": labels[0] if labels else "*"}
             result = self.backend.execute_query(query, params)
+            # execute_query returns a {"success", "records", "keys",
+            # "metadata"} envelope — iterate its records, not the envelope
+            # itself (same read as degree_centrality above).
             return [
-                {"component": r["componentId"], "nodes": r["nodes"]} for r in result
+                {"component": r["componentId"], "nodes": r["nodes"]}
+                for r in result.get("records", [])
             ]
 
         elif "NetworkX" in backend_type:
