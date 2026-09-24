@@ -1,6 +1,7 @@
 """Regression tests for #1727: Neo4jStore.execute_query must convert
 Node/Relationship record values via the Mapping protocol instead of
-degrading them to a list of property names.
+degrading them to a list of property names, and must keep the entity's
+graph identity (labels/type and element id) alongside the properties.
 
 neo4j.graph.Node and neo4j.graph.Relationship subclass Entity, which
 implements the Mapping protocol (items()/keys()) while __iter__ yields
@@ -9,14 +10,16 @@ items(), so ``MATCH (n) RETURN n`` came back as ``{"n": ["name", "age"]}``
 and property values were silently lost. GraphStore.query and DecisionQuery
 read decisions through this path.
 
-The tests feed a real driver ``neo4j.graph.Node`` through execute_query
-(mirroring the issue reproduction, no server needed), pin the unchanged
-behavior for plain mappings, iterables, paths and primitives, and cover the
-related ``GraphAnalytics.connected_components`` envelope read reported in
-the same issue.
+The tests feed real driver ``neo4j.graph.Node``/``Relationship`` objects
+through execute_query (mirroring the issue reproduction, no server
+needed), pin the unchanged behavior for plain mappings, iterables, paths
+and primitives, and cover the related
+``GraphAnalytics.connected_components`` envelope read reported in the
+same issue.
 
-Requires the ``graph-neo4j`` extra (the same requirement as importing
-Neo4jStore itself).
+The neo4j driver is an optional dependency (``graph-neo4j`` extra), so its
+import is guarded: the driver-dependent tests skip when the extra is not
+installed, while the backend-independent analytics test still runs.
 """
 
 import logging
@@ -24,11 +27,17 @@ import unittest
 from types import MappingProxyType
 from unittest.mock import MagicMock
 
-from neo4j.graph import Graph, Node
-
 from semantica.graph_store.graph_store import GraphAnalytics
 from semantica.graph_store.neo4j_store import Neo4jStore
 from semantica.utils.progress_tracker import get_progress_tracker
+
+try:
+    from neo4j.graph import Graph, Node, Relationship
+
+    NEO4J_DRIVER_AVAILABLE = True
+except ImportError:
+    NEO4J_DRIVER_AVAILABLE = False
+    Graph = Node = Relationship = None
 
 
 class _FakeRecord(dict):
@@ -88,8 +97,11 @@ class _FakeNeo4jBackend:
         return self._envelope
 
 
+@unittest.skipUnless(
+    NEO4J_DRIVER_AVAILABLE, "requires the graph-neo4j extra (neo4j driver)"
+)
 class TestExecuteQueryRecordConversion(unittest.TestCase):
-    def test_node_value_keeps_properties(self):
+    def test_node_value_keeps_properties_and_identity(self):
         node = Node(Graph(), "4:abc:1", 1, ["Person"], {"name": "Alice", "age": 30})
         store = _make_store([{"n": node, "name": "Alice"}])
 
@@ -97,21 +109,47 @@ class TestExecuteQueryRecordConversion(unittest.TestCase):
 
         self.assertEqual(
             result["records"],
-            [{"n": {"name": "Alice", "age": 30}, "name": "Alice"}],
+            [
+                {
+                    "n": {
+                        "name": "Alice",
+                        "age": 30,
+                        "labels": ["Person"],
+                        "element_id": "4:abc:1",
+                    },
+                    "name": "Alice",
+                }
+            ],
         )
 
-    def test_node_with_no_properties_converts_to_empty_dict(self):
-        node = Node(Graph(), "4:abc:2", 2, ["Person"], {})
+    def test_node_with_multiple_labels_sorts_labels(self):
+        node = Node(Graph(), "4:abc:2", 2, ["Person", "Leader"], {})
         store = _make_store([{"n": node}])
 
-        result = store.execute_query("MATCH (n:Person) RETURN n")
+        result = store.execute_query("MATCH (n) RETURN n")
 
-        self.assertEqual(result["records"], [{"n": {}}])
+        self.assertEqual(
+            result["records"],
+            [{"n": {"labels": ["Leader", "Person"], "element_id": "4:abc:2"}}],
+        )
 
-    def test_mapping_value_keeps_entries(self):
+    def test_relationship_value_keeps_properties_and_identity(self):
+        graph = Graph()
+        rel = graph.relationship_type("KNOWS")(graph, "4:rel:9", 9, {"since": 2020})
+        store = _make_store([{"r": rel}])
+
+        result = store.execute_query("MATCH ()-[r:KNOWS]->() RETURN r")
+
+        self.assertEqual(
+            result["records"],
+            [{"r": {"since": 2020, "type": "KNOWS", "element_id": "4:rel:9"}}],
+        )
+
+    def test_mapping_value_keeps_entries_without_identity_keys(self):
         # MappingProxyType exposes items() and __iter__ exactly like the
         # driver's Node/Relationship entities (Relationship shares the
-        # Entity/Mapping base with Node).
+        # Entity/Mapping base with Node), so it pins the generic mapping
+        # branch: plain mappings stay plain dicts and gain no identity keys.
         mapping = MappingProxyType({"a": 1, "b": 2})
         store = _make_store([{"m": mapping}])
 

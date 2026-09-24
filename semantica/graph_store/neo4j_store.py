@@ -49,6 +49,7 @@ try:
         ServiceUnavailable,
         TransactionError,
     )
+    from neo4j.graph import Node, Relationship
 
     NEO4J_AVAILABLE = True
 except (ImportError, OSError):
@@ -58,6 +59,8 @@ except (ImportError, OSError):
     AuthError = Exception
     ServiceUnavailable = Exception
     TransactionError = Exception
+    Node = None  # type: ignore[assignment,misc]
+    Relationship = None  # type: ignore[assignment,misc]
 
 
 class Neo4jDriver:
@@ -807,7 +810,10 @@ class Neo4jStore:
             **options: Additional options
 
         Returns:
-            Query results
+            Query results: dict with "success", "records", "keys" and
+            "metadata". Record values are plain Python data; Node and
+            Relationship values become property dicts that also carry their
+            identity ("labels" or "type", and "element_id").
         """
         tracking_id = self.progress_tracker.start_tracking(
             module="graph_store",
@@ -829,14 +835,28 @@ class Neo4jStore:
                     row = {}
                     for key in keys:
                         value = record[key]
-                        # Convert Neo4j types to Python types. Node and
+                        # Convert Neo4j types to plain Python types. Node and
                         # Relationship implement the Mapping protocol but also
-                        # __iter__ (which yields property keys), so the mapping
-                        # check must come first — otherwise entities degrade to
-                        # a list of property names (#1727).
-                        if hasattr(value, "items"):
+                        # __iter__ (which yields property keys), so entities
+                        # must be matched before the generic branches —
+                        # otherwise they degrade to a list of property names
+                        # (#1727). Entities keep their graph identity next to
+                        # their properties (labels for nodes, type for
+                        # relationships, plus the element id); the identity
+                        # keys win over same-named properties.
+                        if NEO4J_AVAILABLE and isinstance(value, (Node, Relationship)):
+                            converted = dict(value)
+                            if isinstance(value, Node):
+                                converted["labels"] = sorted(value.labels)
+                            else:
+                                converted["type"] = value.type
+                            converted["element_id"] = value.element_id
+                            row[key] = converted
+                        elif hasattr(value, "items"):
                             row[key] = dict(value)
-                        elif hasattr(value, "__iter__") and not isinstance(value, (str, dict)):
+                        elif hasattr(value, "__iter__") and not isinstance(
+                            value, (str, dict)
+                        ):
                             row[key] = list(value)
                         else:
                             row[key] = value
