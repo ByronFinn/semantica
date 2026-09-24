@@ -63,6 +63,34 @@ except (ImportError, OSError):
     Relationship = None  # type: ignore[assignment,misc]
 
 
+def _convert_query_value(value: Any) -> Any:
+    """Convert a Neo4j record value to plain Python data, recursively.
+
+    Node and Relationship implement the Mapping protocol while __iter__
+    yields property *keys*, so entities must be matched before the
+    generic branches — otherwise they degrade to a list of property
+    names (#1727). Entities serialize as their property dict plus
+    identity metadata under reserved, underscore-prefixed keys:
+    "_labels" (sorted) for nodes, "_type" for relationships, and
+    "_element_id" for both. The "_"-prefixed namespace is reserved, so
+    user properties (e.g. a "type" property, common in RDF-style data)
+    are never shadowed and every key keeps one deterministic meaning.
+    """
+    if NEO4J_AVAILABLE and isinstance(value, (Node, Relationship)):
+        converted = dict(value)
+        if isinstance(value, Node):
+            converted["_labels"] = sorted(value.labels)
+        else:
+            converted["_type"] = value.type
+        converted["_element_id"] = value.element_id
+        return converted
+    if hasattr(value, "items"):
+        return {key: _convert_query_value(v) for key, v in value.items()}
+    if hasattr(value, "__iter__") and not isinstance(value, (str, dict)):
+        return [_convert_query_value(v) for v in value]
+    return value
+
+
 class Neo4jDriver:
     """Neo4j driver wrapper."""
 
@@ -811,9 +839,11 @@ class Neo4jStore:
 
         Returns:
             Query results: dict with "success", "records", "keys" and
-            "metadata". Record values are plain Python data; Node and
-            Relationship values become property dicts that also carry their
-            identity ("labels" or "type", and "element_id").
+            "metadata". Record values are plain Python data, converted
+            recursively; Node and Relationship values become property
+            dicts that also carry their identity under reserved,
+            underscore-prefixed keys ("_labels" or "_type", and
+            "_element_id").
         """
         tracking_id = self.progress_tracker.start_tracking(
             module="graph_store",
@@ -832,35 +862,9 @@ class Neo4jStore:
                     if not keys:
                         keys = list(record.keys())
 
-                    row = {}
-                    for key in keys:
-                        value = record[key]
-                        # Convert Neo4j types to plain Python types. Node and
-                        # Relationship implement the Mapping protocol but also
-                        # __iter__ (which yields property keys), so entities
-                        # must be matched before the generic branches —
-                        # otherwise they degrade to a list of property names
-                        # (#1727). Entities keep their graph identity next to
-                        # their properties (labels for nodes, type for
-                        # relationships, plus the element id); the identity
-                        # keys win over same-named properties.
-                        if NEO4J_AVAILABLE and isinstance(value, (Node, Relationship)):
-                            converted = dict(value)
-                            if isinstance(value, Node):
-                                converted["labels"] = sorted(value.labels)
-                            else:
-                                converted["type"] = value.type
-                            converted["element_id"] = value.element_id
-                            row[key] = converted
-                        elif hasattr(value, "items"):
-                            row[key] = dict(value)
-                        elif hasattr(value, "__iter__") and not isinstance(
-                            value, (str, dict)
-                        ):
-                            row[key] = list(value)
-                        else:
-                            row[key] = value
-                    records.append(row)
+                    records.append(
+                        {key: _convert_query_value(record[key]) for key in keys}
+                    )
 
                 self.progress_tracker.stop_tracking(
                     tracking_id,

@@ -1,7 +1,8 @@
 """Regression tests for #1727: Neo4jStore.execute_query must convert
 Node/Relationship record values via the Mapping protocol instead of
 degrading them to a list of property names, and must keep the entity's
-graph identity (labels/type and element id) alongside the properties.
+graph identity (labels/type and element id) alongside the properties
+under reserved, underscore-prefixed keys.
 
 neo4j.graph.Node and neo4j.graph.Relationship subclass Entity, which
 implements the Mapping protocol (items()/keys()) while __iter__ yields
@@ -9,6 +10,13 @@ property *keys*. The conversion in execute_query checked __iter__ before
 items(), so ``MATCH (n) RETURN n`` came back as ``{"n": ["name", "age"]}``
 and property values were silently lost. GraphStore.query and DecisionQuery
 read decisions through this path.
+
+Identity lives in a reserved "_"-prefixed namespace ("_labels" for
+nodes, "_type" for relationships, "_element_id" for both) so user
+properties named "labels"/"type"/"element_id" are never shadowed and
+every key keeps one deterministic meaning. Conversion is recursive, so
+entities nested in ``collect(n)``, Cypher maps and paths are converted
+too and records are JSON-serializable.
 
 The tests feed real driver ``neo4j.graph.Node``/``Relationship`` objects
 through execute_query (mirroring the issue reproduction, no server
@@ -22,6 +30,7 @@ import is guarded: the driver-dependent tests skip when the extra is not
 installed, while the backend-independent analytics test still runs.
 """
 
+import json
 import logging
 import unittest
 from types import MappingProxyType
@@ -114,8 +123,8 @@ class TestExecuteQueryRecordConversion(unittest.TestCase):
                     "n": {
                         "name": "Alice",
                         "age": 30,
-                        "labels": ["Person"],
-                        "element_id": "4:abc:1",
+                        "_labels": ["Person"],
+                        "_element_id": "4:abc:1",
                     },
                     "name": "Alice",
                 }
@@ -130,7 +139,7 @@ class TestExecuteQueryRecordConversion(unittest.TestCase):
 
         self.assertEqual(
             result["records"],
-            [{"n": {"labels": ["Leader", "Person"], "element_id": "4:abc:2"}}],
+            [{"n": {"_labels": ["Leader", "Person"], "_element_id": "4:abc:2"}}],
         )
 
     def test_relationship_value_keeps_properties_and_identity(self):
@@ -142,8 +151,73 @@ class TestExecuteQueryRecordConversion(unittest.TestCase):
 
         self.assertEqual(
             result["records"],
-            [{"r": {"since": 2020, "type": "KNOWS", "element_id": "4:rel:9"}}],
+            [{"r": {"since": 2020, "_type": "KNOWS", "_element_id": "4:rel:9"}}],
         )
+
+    def test_identity_keys_never_shadow_user_properties(self):
+        # "type"/"labels" are realistic property names (RDF-style data);
+        # the reserved "_"-prefixed namespace must keep user data and
+        # identity separately addressable, each with one fixed meaning.
+        graph = Graph()
+        rel = graph.relationship_type("KNOWS")(
+            graph, "4:rel:1", 9, {"type": "rdf:Resource", "since": 2020}
+        )
+        node = Node(Graph(), "4:abc:3", 3, ["Person"], {"labels": "user-defined"})
+        store = _make_store([{"r": rel, "n": node}])
+
+        result = store.execute_query("MATCH (n)-[r]->() RETURN n, r")
+
+        record = result["records"][0]
+        self.assertEqual(record["n"]["labels"], "user-defined")
+        self.assertEqual(record["n"]["_labels"], ["Person"])
+        self.assertEqual(record["n"]["_element_id"], "4:abc:3")
+        self.assertEqual(record["r"]["type"], "rdf:Resource")
+        self.assertEqual(record["r"]["_type"], "KNOWS")
+        self.assertEqual(record["r"]["_element_id"], "4:rel:1")
+
+    def test_collect_of_nodes_converts_recursively_and_is_json_serializable(self):
+        graph = Graph()
+        nodes = [
+            Node(graph, "4:abc:4", 4, ["Person"], {"name": "Alice"}),
+            Node(graph, "4:abc:5", 5, ["Person"], {"name": "Bob"}),
+        ]
+        store = _make_store([{"ns": nodes}])
+
+        result = store.execute_query("MATCH (n:Person) RETURN collect(n) AS ns")
+
+        self.assertEqual(
+            result["records"],
+            [
+                {
+                    "ns": [
+                        {
+                            "name": "Alice",
+                            "_labels": ["Person"],
+                            "_element_id": "4:abc:4",
+                        },
+                        {
+                            "name": "Bob",
+                            "_labels": ["Person"],
+                            "_element_id": "4:abc:5",
+                        },
+                    ]
+                }
+            ],
+        )
+        json.dumps(result["records"])  # records are plain Python data
+
+    def test_map_with_nested_entity_converts_recursively(self):
+        node = Node(Graph(), "4:abc:6", 6, ["Person"], {"name": "Alice"})
+        store = _make_store([{"m": {"person": node, "count": 2}}])
+
+        result = store.execute_query("RETURN {person: n, count: 2} AS m")
+
+        self.assertEqual(
+            result["records"][0]["m"]["person"],
+            {"name": "Alice", "_labels": ["Person"], "_element_id": "4:abc:6"},
+        )
+        self.assertEqual(result["records"][0]["m"]["count"], 2)
+        json.dumps(result["records"])
 
     def test_mapping_value_keeps_entries_without_identity_keys(self):
         # MappingProxyType exposes items() and __iter__ exactly like the
