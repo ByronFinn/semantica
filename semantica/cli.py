@@ -45,6 +45,25 @@ if TYPE_CHECKING:
 
 console = Console()
 
+# Supported interpreter range: ``requires-python = ">=3.10,<3.14"`` in
+# pyproject.toml. tests/test_python_support_policy.py fails if the two drift.
+MIN_PYTHON = (3, 10)
+MAX_PYTHON_EXCLUSIVE = (3, 14)
+
+
+def _python_version_check(version: Sequence[int]) -> Tuple[str, Optional[str]]:
+    """Return ``(status, hint)`` for an interpreter ``(major, minor, ...)``."""
+    supported = (
+        f"{MIN_PYTHON[0]}.{MIN_PYTHON[1]}"
+        f"-{MAX_PYTHON_EXCLUSIVE[0]}.{MAX_PYTHON_EXCLUSIVE[1] - 1}"
+    )
+    major_minor = (version[0], version[1])
+    if major_minor < MIN_PYTHON:
+        return "fail", f"upgrade to Python {supported}"
+    if major_minor >= MAX_PYTHON_EXCLUSIVE:
+        return "warn", f"Python {supported} is supported; newer versions are untested"
+    return "ok", None
+
 # ─── Visual style constants ───────────────────────────────────────────────────
 _BRAND    = "bold blue"
 _KEY      = "cyan"
@@ -869,9 +888,9 @@ def doctor(cli_ctx: CLIContext, local_json: bool, deep_embeddings: bool) -> None
 
         # Python version
         pv = sys.version_info
-        checks.append(("Python", "ok" if pv >= (3, 8) else "fail",
-                        f"{pv.major}.{pv.minor}.{pv.micro}",
-                        "upgrade to Python 3.8+" if pv < (3, 8) else None))
+        py_status, py_hint = _python_version_check(pv)
+        checks.append(("Python", py_status,
+                        f"{pv.major}.{pv.minor}.{pv.micro}", py_hint))
 
         # Semantica version
         checks.append(("semantica", "ok", __version__, None))
@@ -1076,7 +1095,7 @@ def init_cmd(cli_ctx: CLIContext, force: bool) -> None:
 @click.argument("path", default=".", type=click.Path(exists=True))
 @click.option("--type", "ingestor_type", default=None, help="Force ingestor type.")
 @click.option("--store", "store_override", default=None, help="Target graph backend.")
-@click.option("--patterns", default="*.pdf,*.docx,*.txt,*.csv,*.json",
+@click.option("--patterns", default="*.pdf,*.docx,*.txt,*.csv,*.json,*.jsonl,*.ndjson",
               show_default=True, help="Comma-separated glob patterns to match.")
 @click.pass_obj
 def watch_cmd(cli_ctx: CLIContext, path: str, ingestor_type: Optional[str],
@@ -1702,6 +1721,218 @@ def kg_validate_cmd(cli_ctx: CLIContext, local_json: bool) -> None:
     _run_with_error_handling(_action)
 
 
+@kg.command("global")
+@click.argument("query_str")
+@click.option(
+    "--reports",
+    "reports_path",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to JSON file containing community reports.",
+)
+@click.option(
+    "--hierarchy",
+    "hierarchy_path",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to JSON file containing community hierarchy.",
+)
+@click.option(
+    "--level",
+    type=int,
+    default=None,
+    help="Coarsening level to query.",
+)
+@click.option(
+    "--max-tokens",
+    type=int,
+    default=4000,
+    show_default=True,
+    help="Token budget for retrieval context.",
+)
+@click.option(
+    "--min-relevance",
+    type=float,
+    default=0.0,
+    show_default=True,
+    help="Minimum relevance score (0.0 to 10.0).",
+)
+@click.option("--json", "local_json", is_flag=True, default=False)
+@click.pass_obj
+def kg_global_cmd(
+    cli_ctx: CLIContext,
+    query_str: str,
+    reports_path: Optional[str],
+    hierarchy_path: Optional[str],
+    level: Optional[int],
+    max_tokens: int,
+    min_relevance: float,
+    local_json: bool,
+) -> None:
+    """Run global Map-Reduce search over hierarchical community reports."""
+    cli_ctx = _require_ctx(cli_ctx)
+    json_out = _is_json(cli_ctx, local_json)
+
+    def _action() -> None:
+        try:
+            from .context.methods import retrieve_global
+            from .kg.community_hierarchy import CommunityHierarchy
+        except ImportError as exc:
+            raise click.ClickException(f"Module not available: {exc}") from exc
+
+        loaded_reports = None
+        if reports_path:
+            try:
+                with open(reports_path, "r", encoding="utf-8") as f:
+                    loaded_reports = json.load(f)
+            except Exception as exc:
+                raise click.ClickException(
+                    f"Failed to read reports file '{reports_path}': {exc}"
+                ) from exc
+        else:
+            raise click.ClickException(
+                "Global retrieval requires --reports. "
+                "Please provide a path to community reports."
+            )
+
+        loaded_hierarchy = None
+        if hierarchy_path:
+            try:
+                with open(hierarchy_path, "r", encoding="utf-8") as f:
+                    h_data = json.load(f)
+                    loaded_hierarchy = CommunityHierarchy.from_dict(h_data)
+            except Exception as exc:
+                raise click.ClickException(
+                    f"Failed to read hierarchy file '{hierarchy_path}': {exc}"
+                ) from exc
+
+        result = retrieve_global(
+            query=query_str,
+            reports=loaded_reports,
+            hierarchy=loaded_hierarchy,
+            level=level,
+            max_context_tokens=max_tokens,
+            min_relevance_score=min_relevance,
+        )
+
+        if json_out:
+            _jecho(result.to_dict())
+        else:
+            _ok(
+                cli_ctx,
+                f"Global Search Results (Level {result.level}, "
+                f"Reports: {len(result.community_reports_used)}):",
+            )
+            console.print(f"\n{result.response}\n")
+            if result.citations:
+                console.print(f"Citations: {', '.join(result.citations)}")
+            console.print(
+                f"Key Points: {len(result.key_points)} | "
+                f"Time: {result.metrics.get('time_taken', 0.0):.2f}s"
+            )
+
+    _run_with_error_handling(_action)
+
+
+@kg.command("drift")
+@click.argument("query_str")
+@click.option(
+    "--reports",
+    "reports_path",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to JSON file containing community reports.",
+)
+@click.option(
+    "--graph",
+    "graph_path",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to JSON file containing knowledge graph.",
+)
+@click.option(
+    "--depth",
+    type=int,
+    default=2,
+    show_default=True,
+    help="Traversal depth for entity exploration.",
+)
+@click.option(
+    "--drift-threshold",
+    type=float,
+    default=0.35,
+    show_default=True,
+    help="Threshold for semantic drift pruning.",
+)
+@click.option("--json", "local_json", is_flag=True, default=False)
+@click.pass_obj
+def kg_drift_cmd(
+    cli_ctx: CLIContext,
+    query_str: str,
+    reports_path: Optional[str],
+    graph_path: Optional[str],
+    depth: int,
+    drift_threshold: float,
+    local_json: bool,
+) -> None:
+    """Run DRIFT hybrid search combining global framing and local exploration."""
+    cli_ctx = _require_ctx(cli_ctx)
+    json_out = _is_json(cli_ctx, local_json)
+
+    def _action() -> None:
+        try:
+            from .context.methods import retrieve_drift
+        except ImportError as exc:
+            raise click.ClickException(f"Module not available: {exc}") from exc
+
+        loaded_reports = None
+        if reports_path:
+            try:
+                with open(reports_path, "r", encoding="utf-8") as f:
+                    loaded_reports = json.load(f)
+            except Exception as exc:
+                raise click.ClickException(
+                    f"Failed to read reports file '{reports_path}': {exc}"
+                ) from exc
+
+        loaded_graph = None
+        if graph_path:
+            try:
+                with open(graph_path, "r", encoding="utf-8") as f:
+                    loaded_graph = json.load(f)
+            except Exception as exc:
+                raise click.ClickException(
+                    f"Failed to read graph file '{graph_path}': {exc}"
+                ) from exc
+
+        result = retrieve_drift(
+            query=query_str,
+            knowledge_graph=loaded_graph,
+            reports=loaded_reports,
+            max_depth=depth,
+            drift_threshold=drift_threshold,
+        )
+
+        if json_out:
+            _jecho(result.to_dict())
+        else:
+            _ok(
+                cli_ctx,
+                f"DRIFT Hybrid Search Results (Depth {result.depth_reached}, "
+                f"Facts: {len(result.verified_local_contexts)}):",
+            )
+            console.print(f"\n{result.answer}\n")
+            if result.citations:
+                console.print(f"Citations: {', '.join(result.citations)}")
+            console.print(
+                f"Facets Explored: {len(result.facets_explored)} | "
+                f"Pruned Facts: {result.pruned_fact_count} | "
+                f"Time: {result.metrics.get('time_taken', 0.0):.2f}s"
+            )
+
+    _run_with_error_handling(_action)
+
+
 # ─── Data In ──────────────────────────────────────────────────────────────────
 
 
@@ -1711,7 +1942,9 @@ _INGEST_TYPES = [
     "snowflake", "stream",
 ]
 
-_INGEST_FORMATS = ["pdf", "docx", "csv", "excel", "html", "json", "parquet", "xml", "rdf"]
+_INGEST_FORMATS = [
+    "pdf", "docx", "csv", "excel", "html", "json", "jsonl", "ndjson", "parquet", "xml", "rdf"
+]
 _GRAPH_STORE_ENV_BACKEND_HINTS = {
     "GRAPH_STORE_NEO4J_URI": "neo4j",
     "GRAPH_STORE_FALKORDB_HOST": "falkordb",
@@ -3838,11 +4071,33 @@ def ontology_version(cli_ctx: CLIContext, local_json: bool) -> None:
 # ─── Data Out ─────────────────────────────────────────────────────────────────
 
 
+# Formats this command can build out of a graph-store dump. Three are left out
+# because a dump of entities and relationships cannot feed them: OWL and SHACL
+# are serialized from an ontology (`semantica ontology shacl` generates the
+# shapes), and the distance matrix is computed from an Explorer session graph
+# (POST /api/export/distance-enriched). Offering them advertised a failure, and
+# offering OWL would advertise a document with no classes in it.
 _EXPORT_FORMATS = [
     "turtle", "jsonld", "ntriples", "rdfxml",
     "parquet", "arrow", "csv", "json", "yaml",
-    "graphml", "owl", "shacl", "arangodb", "distance-enriched",
+    "graphml", "arangodb",
 ]
+
+
+def _multi_file_destination_error(
+    format_name: str, compress: bool
+) -> click.ClickException:
+    """The error for asking a multi-file format for a single destination."""
+    if compress:
+        return click.ClickException(
+            f"--format {format_name} writes one file per collection, so "
+            f"--compress has no single file to compress; use --output and leave "
+            f"--compress off."
+        )
+    return click.ClickException(
+        f"--format {format_name} writes one file per collection, so stdout "
+        f"cannot carry it; pass --output to name where they go."
+    )
 
 
 @main.command()
@@ -3861,13 +4116,19 @@ def export(
     cli_ctx: CLIContext, fmt: str, output: Optional[str], with_provenance: bool,
     filter_str: Optional[str], compress: bool, local_dry: bool, local_json: bool,
 ) -> None:
-    """Export the graph in 14 supported formats.
+    """Export the graph in 11 supported formats.
+
+    \b
+    arrow, csv and parquet write one file per collection, so --output names a
+    base path there and these formats cannot go to stdout.
 
     \b
     Examples:
       semantica export --format turtle --output graph.ttl
-      semantica export --format parquet --with-provenance --output graph.parquet
+      semantica export --format parquet --output graph.parquet
+        writes graph_entities.parquet and graph_relationships.parquet
       semantica export --format csv --filter "type:Person" --output persons.csv
+        writes persons_entities.csv and persons_relationships.csv
     """
     cli_ctx = _require_ctx(cli_ctx)
 
@@ -3879,13 +4140,19 @@ def export(
         try:
             import tempfile
 
-            from .export import get_export_method
+            from .export import MULTI_FILE_FORMATS, get_export_method
             from .graph_store import get_nodes, get_relationships
             from .graph_store.config import graph_store_config
 
             fn = get_export_method("export", "knowledge_graph")
             if fn is None:
                 raise click.ClickException("Export method not available: export/knowledge_graph")
+
+            # Fail before the store is read. These routes write one file per
+            # collection, which is neither one stream nor one compressed file,
+            # and finding that out after a full export wastes the read.
+            if fmt in MULTI_FILE_FORMATS and (compress or not output):
+                raise _multi_file_destination_error(fmt, compress)
 
             graph_db = dict(cli_ctx.config.to_dict().get("graph_db", {}))
             backend = cli_ctx.store_backend or graph_db.pop("backend", None)
@@ -3920,30 +4187,50 @@ def export(
                 temp_handle.close()
                 target_output = temp_output
 
-            fn(knowledge_graph, target_output, **kwargs)
+            written = fn(knowledge_graph, target_output, **kwargs)
         except ImportError as exc:
             raise click.ClickException(f"Export module not available: {exc}") from exc
-        if compress:
-            import gzip
 
-            assert temp_output is not None
-            compressed = gzip.compress(Path(temp_output).read_bytes())
-            if output:
-                Path(output).write_bytes(compressed)
-                _ok(cli_ctx, f"Wrote compressed {output}")
+        # A route that decides its own output names the files it wrote: Arrow
+        # and Parquet write one file per collection, so the path this command
+        # was given is a base name and is never created. Report what is there
+        # rather than the name that was asked for.
+        produced = [Path(p) for p in written] if written else []
+        try:
+            if produced and (compress or not output):
+                # A backstop: a route that starts writing several files is
+                # caught here too, not only the two rejected above.
+                raise _multi_file_destination_error(fmt, compress)
+            if compress:
+                import gzip
+
+                assert temp_output is not None
+                compressed = gzip.compress(Path(temp_output).read_bytes())
+                if output:
+                    Path(output).write_bytes(compressed)
+                    _ok(cli_ctx, f"Wrote compressed {output}")
+                else:
+                    sys.stdout.buffer.write(compressed)
+            elif output:
+                if produced:
+                    _ok(cli_ctx, f"Wrote {', '.join(str(p) for p in produced)}")
+                elif written is None:
+                    _ok(cli_ctx, f"Wrote {output}")
+                else:
+                    _warn(
+                        cli_ctx,
+                        "Nothing written: the store returned no entities or "
+                        "relationships.",
+                    )
             else:
-                sys.stdout.buffer.write(compressed)
-        elif output:
-            _ok(cli_ctx, f"Wrote {output}")
-        else:
-            assert temp_output is not None
-            try:
-                click.echo(Path(temp_output).read_text(encoding="utf-8"))
-            except UnicodeDecodeError:
-                sys.stdout.buffer.write(Path(temp_output).read_bytes())
-
-        if temp_output:
-            Path(temp_output).unlink(missing_ok=True)
+                assert temp_output is not None
+                try:
+                    click.echo(Path(temp_output).read_text(encoding="utf-8"))
+                except UnicodeDecodeError:
+                    sys.stdout.buffer.write(Path(temp_output).read_bytes())
+        finally:
+            if temp_output:
+                Path(temp_output).unlink(missing_ok=True)
 
     _run_with_error_handling(_action)
 

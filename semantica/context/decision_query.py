@@ -387,10 +387,8 @@ class DecisionQuery:
 
         decisions = []
         for record in results:
-            decision_data = self._node_props(record.get("d")) if isinstance(record, dict) else None
-
+            decision_data = record.get("d") if isinstance(record, dict) else None
             if not isinstance(decision_data, dict):
-
                 decision_data = record if isinstance(record, dict) else {}
             decision = self._dict_to_decision(decision_data)
             
@@ -463,10 +461,8 @@ class DecisionQuery:
             
             decisions = []
             for record in results:
-                decision_data = self._node_props(record.get("d")) if isinstance(record, dict) else None
-
+                decision_data = record.get("d") if isinstance(record, dict) else None
                 if not isinstance(decision_data, dict):
-
                     decision_data = record if isinstance(record, dict) else {}
                 decisions.append(self._dict_to_decision(decision_data))
             
@@ -533,10 +529,8 @@ class DecisionQuery:
             
             decisions = []
             for record in results:
-                decision_data = self._node_props(record.get("d")) if isinstance(record, dict) else None
-
+                decision_data = record.get("d") if isinstance(record, dict) else None
                 if not isinstance(decision_data, dict):
-
                     decision_data = record if isinstance(record, dict) else {}
                 decisions.append(self._dict_to_decision(decision_data))
             
@@ -626,10 +620,8 @@ class DecisionQuery:
             
             decisions = []
             for record in results:
-                decision_data = self._node_props(record.get("d")) if isinstance(record, dict) else None
-
+                decision_data = record.get("d") if isinstance(record, dict) else None
                 if not isinstance(decision_data, dict):
-
                     decision_data = record if isinstance(record, dict) else {}
                 decisions.append(self._dict_to_decision(decision_data))
             
@@ -730,10 +722,8 @@ class DecisionQuery:
             
             decisions = []
             for record in results:
-                decision_data = self._node_props(record.get("d")) if isinstance(record, dict) else None
-
+                decision_data = record.get("d") if isinstance(record, dict) else None
                 if not isinstance(decision_data, dict):
-
                     decision_data = record if isinstance(record, dict) else {}
                 decision = self._dict_to_decision(decision_data)
                 decision.metadata["hop_count"] = record.get("hop_count", 0)
@@ -943,6 +933,24 @@ class DecisionQuery:
             self.logger.error(f"Failed to find similar exceptions: {e}")
             raise
     
+    @staticmethod
+    def _deserialize_graph_metadata(metadata: Any) -> Dict[str, Any]:
+        """Deserialize metadata from graph node properties to a dictionary.
+        
+        Property-graph stores (e.g. Neo4j) persist metadata as JSON strings.
+        Decodes JSON strings back into Dict[str, Any] while gracefully handling
+        non-JSON strings and retaining already-native dicts.
+        """
+        if isinstance(metadata, str):
+            try:
+                parsed = json.loads(metadata)
+                return parsed if isinstance(parsed, dict) else {"raw": metadata}
+            except (TypeError, ValueError):
+                return {"raw": metadata} if metadata else {}
+        elif isinstance(metadata, dict):
+            return metadata
+        return {}
+
     def _dict_to_decision(self, data: Dict[str, Any]) -> Decision:
         """Convert dictionary to Decision object."""
         # Handle timestamp conversion
@@ -952,15 +960,6 @@ class DecisionQuery:
         decision_id = data.get("decision_id") or data.get("id")
         if not decision_id:
             raise KeyError("decision_id")
-
-        # metadata is stored as a JSON string on property-graph stores
-        # (Neo4j property values cannot be maps) — deserialize transparently.
-        metadata = data.get("metadata", {})
-        if isinstance(metadata, str):
-            try:
-                metadata = json.loads(metadata)
-            except (TypeError, ValueError):
-                metadata = {"raw": metadata}
 
         return Decision(
             decision_id=decision_id,
@@ -973,7 +972,7 @@ class DecisionQuery:
             decision_maker=data.get("decision_maker", ""),
             reasoning_embedding=data.get("reasoning_embedding"),
             node2vec_embedding=data.get("node2vec_embedding"),
-            metadata=metadata,
+            metadata=self._deserialize_graph_metadata(data.get("metadata")),
         )
     
     def _dict_to_exception(self, data: Dict[str, Any]) -> PolicyException:
@@ -996,7 +995,7 @@ class DecisionQuery:
             approver=data.get("approver", ""),
             approval_timestamp=data.get("approval_timestamp", datetime.now()),
             justification=data.get("justification", ""),
-            metadata=data.get("metadata", {}),
+            metadata=self._deserialize_graph_metadata(data.get("metadata")),
         )
     
     def _calculate_semantic_similarity(self, text1: str, text2: str) -> float:
@@ -1309,23 +1308,6 @@ class DecisionQuery:
         except Exception as e:
             self.logger.error(f"Failed to predict relationships: {e}")
             return []
-
-    @staticmethod
-    def _node_props(value: Any) -> Any:
-        """Convert driver node/relationship objects (e.g. neo4j.Node) to property dicts.
-
-        Property-graph drivers return hydrated graph objects for ``RETURN d``-style
-        queries, not plain dicts — normalize transparently; dicts and scalars pass through.
-        """
-        if isinstance(value, dict):
-            return value
-        items = getattr(value, "items", None)
-        if callable(items):
-            try:
-                return dict(value.items())
-            except Exception:
-                return value
-        return value
 
     def _extract_records(self, results: Any) -> List[Dict[str, Any]]:
         """Normalize execute_query result shapes to a list of record maps."""

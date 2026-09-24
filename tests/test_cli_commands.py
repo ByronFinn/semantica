@@ -332,6 +332,35 @@ class TestIngest:
         assert captured["kwargs"]["batch_size"] == 500
         assert captured["kwargs"]["format"] == "csv"
 
+    @pytest.mark.parametrize("fmt", ["ndjson", "jsonl"])
+    def test_ingest_format_line_delimited_json(self, runner, monkeypatch, fmt):
+        captured = {}
+
+        def fake_ingest_file(sources, **kwargs):
+            captured["sources"] = sources
+            captured["kwargs"] = kwargs
+            return [{"path": sources}]
+
+        monkeypatch.setattr("semantica.ingest.methods.ingest_file", fake_ingest_file)
+
+        result = runner.invoke(
+            cli_module.main,
+            ["ingest", f"data.{fmt}", "--type", "file", "--format", fmt, "--json"],
+        )
+
+        _ok(result)
+        data = _json_output(result)
+        assert data["files"] == [{"path": f"data.{fmt}"}]
+        assert captured["sources"] == f"data.{fmt}"
+        assert captured["kwargs"]["method"] == "file"
+        assert captured["kwargs"]["format"] == fmt
+
+    def test_watch_help_shows_line_delimited_json_patterns(self, runner):
+        result = runner.invoke(cli_module.main, ["watch", "--help"])
+        _ok(result)
+        assert "*.jsonl" in result.output
+        assert "*.ndjson" in result.output
+
     def test_runtime_path_passes_source_positionally_with_auto_detection(self, runner, monkeypatch):
         captured = {}
 
@@ -1219,10 +1248,12 @@ class TestReason:
         """--engine graph should call GraphReasoner.reason(graph, query) and
         surface its natural-language answer, not the facts-count shape.
 
-        Also regression-guards two context-building gaps: a node with
-        multiple labels must keep all of them (not just labels[0]), and a
-        relationship's properties must reach GraphReasoner, not just its
-        source/target/type.
+        Also regression-guards three context-building gaps: a node with
+        multiple labels must keep all of them (not just labels[0]), a
+        relationship's properties must reach GraphReasoner (not just its
+        source/target/type), and start_node_id/end_node_id must resolve to
+        the actual node names rather than leaking raw internal ids into the
+        graph context sent to the LLM.
         """
         pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
 
@@ -1246,6 +1277,10 @@ class TestReason:
                 assert graph["entities"][0]["type"] == "Person/Manager"
                 assert graph["relationships"][0]["type"] == "MANAGES"
                 assert graph["relationships"][0]["properties"] == {"since": "2020"}
+                # start_node_id/end_node_id (1, 2) must resolve to node
+                # names, not leak raw internal ids into the LLM's context.
+                assert graph["relationships"][0]["source"] == "Alice"
+                assert graph["relationships"][0]["target"] == "Bob"
                 assert query == "Who manages Bob?"
                 return "Alice manages Bob."
 
@@ -1289,6 +1324,35 @@ class TestReason:
             cli_module.main, ["reason", "run", "--engine", "graph", "--query", "anything?"])
         assert result.exit_code != 0
         assert "LLM provider not initialized" in result.output
+        assert "Traceback" not in result.output
+
+    def test_run_graph_surfaces_generation_failure_as_error(self, runner, monkeypatch):
+        """The second GraphReasoner error path -- a generation-time failure
+        (e.g. provider initialized but the call itself fails) returns
+        "Error during reasoning: ..." rather than the "not initialized"
+        string. reason run must surface this as a real command failure too,
+        not just the first error string."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+
+        class _EmptyStore:
+            def get_nodes(self, limit=None): return []
+            def get_relationships(self, limit=None): return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _EmptyStore())
+
+        class _FailingGraphReasoner:
+            def __init__(self, config=None, **kwargs):
+                pass
+
+            def reason(self, graph, query, **options):
+                return "Error during reasoning: connection timed out"
+
+        monkeypatch.setattr(
+            "semantica.reasoning.GraphReasoner", _FailingGraphReasoner, raising=False)
+        result = runner.invoke(
+            cli_module.main, ["reason", "run", "--engine", "graph", "--query", "anything?"])
+        assert result.exit_code != 0
+        assert "Error during reasoning" in result.output
         assert "Traceback" not in result.output
 
     def test_load_rule_definitions_formats(self, tmp_path):
@@ -1817,12 +1881,80 @@ class TestOntology:
 # ─── export ───────────────────────────────────────────────────────────────────
 
 
+# The record shape the Neo4j and FalkorDB backends return: endpoints named
+# start_node_id/end_node_id, and get_nodes() nesting its fields under
+# "properties". The local store uses source_id/target_id, so a fixture written
+# against it hid the fact that the command fed the exporters a shape they could
+# not read (#1712).
+STORE_NODES = [
+    {"id": "n1", "type": "Person", "name": "Alice", "properties": {"name": "Alice"}}
+]
+STORE_RELATIONSHIP = {
+    "id": "r1",
+    "start_node_id": "n1",
+    "end_node_id": "n1",
+    "type": "KNOWS",
+    "properties": {},
+}
+
+# The extension each multi-file format is written under, checked against the
+# list the command refuses a single destination for.
+MULTI_FILE_EXTENSIONS = {"arrow": ".arrow", "csv": ".csv", "parquet": ".parquet"}
+
+
+def _patch_graph_store(monkeypatch, relationships, nodes=None) -> dict:
+    """Point the export command at a fake store, and count how often it reads."""
+    node_records = STORE_NODES if nodes is None else nodes
+    reads = {"nodes": 0}
+
+    def get_nodes(**kwargs):
+        reads["nodes"] += 1
+        return [dict(n) for n in node_records]
+
+    def get_relationships(**kwargs):
+        return [dict(r) for r in relationships]
+
+    class FakeGraphStore:
+        def get_nodes(self, **kwargs):
+            return get_nodes(**kwargs)
+
+        def get_relationships(self, **kwargs):
+            return get_relationships(**kwargs)
+
+    monkeypatch.setattr(
+        "semantica.graph_store.methods._get_store", lambda: FakeGraphStore()
+    )
+    for target in (
+        "semantica.graph_store.get_nodes",
+        "semantica.graph_store.methods.get_nodes",
+    ):
+        monkeypatch.setattr(target, get_nodes)
+    for target in (
+        "semantica.graph_store.get_relationships",
+        "semantica.graph_store.methods.get_relationships",
+    ):
+        monkeypatch.setattr(target, get_relationships)
+    return reads
+
+
+def test_multi_file_extensions_cover_what_the_command_lists():
+    from semantica.export import MULTI_FILE_FORMATS
+
+    assert set(MULTI_FILE_EXTENSIONS) == set(
+        MULTI_FILE_FORMATS
+    ), "a multi-file format was added or removed without updating these tests"
+
+
 class TestExport:
-    def test_help_shows_14_formats(self, runner):
+    def test_help_shows_the_offered_formats(self, runner):
         result = runner.invoke(cli_module.main, ["export", "--help"])
         _ok(result)
-        for fmt in ["turtle", "parquet", "csv", "graphml", "owl", "arangodb"]:
+        for fmt in cli_module._EXPORT_FORMATS:
             assert fmt in result.output
+        # These three need an ontology or an Explorer session, not a graph
+        # dump, so they are no longer offered (#1712).
+        for fmt in ["owl", "shacl", "distance-enriched"]:
+            assert fmt not in result.output
         for flag in ["--with-provenance", "--filter", "--compress", "--dry-run"]:
             assert flag in result.output
 
@@ -1844,78 +1976,7 @@ class TestExport:
         assert data["dry_run"] is True
 
     def test_real_export_runtime_path(self, runner, tmp_path, monkeypatch):
-        class FakeGraphStore:
-            def get_nodes(self, labels=None, properties=None, limit=100, **options):
-                return [
-                    {
-                        "id": "n1",
-                        "type": "Person",
-                        "name": "Alice",
-                        "properties": {"name": "Alice"},
-                    }
-                ]
-
-            def get_relationships(self, node_id=None, rel_type=None, direction="both", limit=100, **options):
-                return [
-                    {
-                        "id": "r1",
-                        "source": "n1",
-                        "target": "n1",
-                        "type": "KNOWS",
-                        "properties": {},
-                    }
-                ]
-
-        monkeypatch.setattr(
-            "semantica.graph_store.methods._get_store",
-            lambda: FakeGraphStore(),
-        )
-        monkeypatch.setattr(
-            "semantica.graph_store.get_nodes",
-            lambda **kwargs: [
-                {
-                    "id": "n1",
-                    "type": "Person",
-                    "name": "Alice",
-                    "properties": {"name": "Alice"},
-                }
-            ],
-        )
-        monkeypatch.setattr(
-            "semantica.graph_store.methods.get_nodes",
-            lambda **kwargs: [
-                {
-                    "id": "n1",
-                    "type": "Person",
-                    "name": "Alice",
-                    "properties": {"name": "Alice"},
-                }
-            ],
-        )
-        monkeypatch.setattr(
-            "semantica.graph_store.get_relationships",
-            lambda **kwargs: [
-                {
-                    "id": "r1",
-                    "source": "n1",
-                    "target": "n1",
-                    "type": "KNOWS",
-                    "properties": {},
-                }
-            ],
-        )
-        monkeypatch.setattr(
-            "semantica.graph_store.methods.get_relationships",
-            lambda **kwargs: [
-                {
-                    "id": "r1",
-                    "source": "n1",
-                    "target": "n1",
-                    "type": "KNOWS",
-                    "properties": {},
-                }
-            ],
-        )
+        _patch_graph_store(monkeypatch, [STORE_RELATIONSHIP])
 
         output_path = tmp_path / "export.json"
         result = runner.invoke(cli_module.main, ["export", "--format", "json", "--output", str(output_path)])
@@ -1937,6 +1998,82 @@ class TestExport:
             result = runner.invoke(cli_module.main, ["export", "--format", "json"])
         assert result.exit_code != 0
         assert "Traceback" not in result.output
+
+
+class TestExportMultiFileFormats:
+    """Formats that write one file per collection, driven through the command.
+
+    ``arrow``, ``csv`` and ``parquet`` take ``--output`` as a base name and
+    write ``graph_entities.*``/``graph_relationships.*`` next to it, so the
+    path the command was given is never created. It used to report that path as
+    written anyway, hand stdout an empty file, and compress a base file that
+    did not exist.
+    """
+
+    @pytest.mark.parametrize("fmt,ext", sorted(MULTI_FILE_EXTENSIONS.items()))
+    def test_reports_the_files_it_wrote(self, runner, tmp_path, monkeypatch, fmt, ext):
+        _patch_graph_store(monkeypatch, [STORE_RELATIONSHIP])
+        target = tmp_path / f"graph{ext}"
+
+        result = runner.invoke(
+            cli_module.main, ["export", "--format", fmt, "--output", str(target)]
+        )
+
+        _ok(result)
+        names = sorted(p.name for p in tmp_path.iterdir())
+        assert names == [f"graph_entities{ext}", f"graph_relationships{ext}"], names
+        for name in names:
+            assert name in result.output, f"{name} not reported: {result.output!r}"
+        assert not target.exists(), (
+            "the command was asked for a base name; it must not be reported as "
+            "the artifact"
+        )
+
+    @pytest.mark.parametrize("fmt,ext", sorted(MULTI_FILE_EXTENSIONS.items()))
+    @pytest.mark.parametrize(
+        "flags,mention",
+        [([], "--output"), (["--compress"], "--compress")],
+    )
+    def test_a_single_destination_is_refused(
+        self, runner, tmp_path, monkeypatch, fmt, ext, flags, mention
+    ):
+        reads = _patch_graph_store(monkeypatch, [STORE_RELATIONSHIP])
+
+        result = runner.invoke(cli_module.main, ["export", "--format", fmt] + flags)
+
+        assert result.exit_code != 0, f"{flags} exited 0: {result.output!r}"
+        assert mention in result.output, f"{result.output!r} does not mention {mention}"
+        assert reads["nodes"] == 0, "the store was read before the format was refused"
+
+    def test_arrow_without_relationships_still_exports(
+        self, runner, tmp_path, monkeypatch
+    ):
+        """A graph whose nodes have no edges between them is not an error."""
+        _patch_graph_store(monkeypatch, [])
+        target = tmp_path / "graph.arrow"
+
+        result = runner.invoke(
+            cli_module.main, ["export", "--format", "arrow", "--output", str(target)]
+        )
+
+        _ok(result)
+        assert (tmp_path / "graph_entities.arrow").exists()
+        assert not (tmp_path / "graph_relationships.arrow").exists()
+
+    @pytest.mark.parametrize("fmt,ext", sorted(MULTI_FILE_EXTENSIONS.items()))
+    def test_an_empty_store_writes_nothing_and_says_so(
+        self, runner, tmp_path, monkeypatch, fmt, ext
+    ):
+        _patch_graph_store(monkeypatch, [], nodes=[])
+        target = tmp_path / f"graph{ext}"
+
+        result = runner.invoke(
+            cli_module.main, ["export", "--format", fmt, "--output", str(target)]
+        )
+
+        _ok(result)
+        assert "Nothing written" in result.output, result.output
+        assert not list(tmp_path.iterdir())
 
 
 # ─── visualize ────────────────────────────────────────────────────────────────
@@ -2222,6 +2359,83 @@ class TestStore:
                                       "--from", "sqlite", "--to", "pgvector", "--json"])
         _ok(result)
         assert dest_configs["pgvector"].get("dimension") == 3
+
+    def test_migrate_retry_reloads_persisted_faiss_state(
+        self, runner, monkeypatch, tmp_path
+    ):
+        pytest.importorskip("faiss")
+        import numpy as np
+
+        from semantica.vector_store.faiss_store import FAISSStore
+
+        index_path = tmp_path / "migrated.faiss"
+        source_items = [
+            {"id": "a", "vector": [0.1, 0.2, 0.3], "metadata": {"tag": "x"}},
+            {"id": "b", "vector": [0.4, 0.5, 0.6], "metadata": {"tag": "y"}},
+        ]
+
+        class _SourceBackend:
+            dimension = 3
+
+        class _MigrationStore:
+            def __init__(self, backend, config=None, **kw):
+                self.backend = backend
+                if backend == "sqlite":
+                    self._backend_store = _SourceBackend()
+                else:
+                    self._backend_store = FAISSStore(dimension=3)
+                    self._backend_store.create_index(index_type="flat")
+
+            def iter_vectors(self, batch_size=500):
+                if self.backend == "sqlite":
+                    yield from source_items
+
+            def store_vectors(self, vectors, metadata, ids=None):
+                self._backend_store.add_vectors(
+                    np.asarray(vectors, dtype=np.float32),
+                    ids=ids,
+                    metadata=metadata,
+                )
+
+        fake_vs = _fake_module(VectorStore=_MigrationStore)
+        monkeypatch.setitem(
+            __import__("sys").modules, "semantica.vector_store", fake_vs
+        )
+        monkeypatch.setattr(
+            cli_module.Config,
+            "to_dict",
+            lambda self: {
+                "vector_store": {
+                    "sqlite": {"dimension": 3},
+                    "faiss": {"dimension": 3, "index_path": str(index_path)},
+                }
+            },
+        )
+
+        command = [
+            "store",
+            "migrate",
+            "--from",
+            "sqlite",
+            "--to",
+            "faiss",
+            "--json",
+        ]
+        first_result = runner.invoke(cli_module.main, command)
+        _ok(first_result)
+
+        first_load = FAISSStore(dimension=3)
+        first_load.load_index(index_path, index_type="flat")
+        assert first_load.index.vector_ids == ["a", "b"]
+        assert first_load.index.index.ntotal == 2
+
+        retry_result = runner.invoke(cli_module.main, command)
+        _ok(retry_result)
+
+        retry_load = FAISSStore(dimension=3)
+        retry_load.load_index(index_path, index_type="flat")
+        assert retry_load.index.vector_ids == ["a", "b"]
+        assert retry_load.index.index.ntotal == 2
 
     def test_migrate_faiss_source_requires_index_path(self, runner, monkeypatch):
         fake_vs = _fake_module(VectorStore=lambda **kw: MagicMock())
