@@ -13,15 +13,32 @@ read decisions through this path.
 
 Identity lives in a reserved "_"-prefixed namespace ("_labels" for
 nodes, "_type" for relationships, "_element_id" for both) so user
-properties named "labels"/"type"/"element_id" are never shadowed and
-every key keeps one deterministic meaning. Conversion is recursive, so
-entities nested in ``collect(n)``, Cypher maps and paths are converted
-too and records are JSON-serializable.
+properties named "labels"/"type"/"element_id" (no underscore) are never
+shadowed. User properties whose names already start with "_" — e.g.
+"_labels", "_type", "_element_id" — will be overwritten by the
+corresponding identity key; such property names are therefore reserved and
+should not be used in Neo4j schemas managed by this library.
 
-The tests feed real driver ``neo4j.graph.Node``/``Relationship`` objects
-through execute_query (mirroring the issue reproduction, no server
-needed), pin the unchanged behavior for plain mappings, iterables, paths
-and primitives, and cover the related
+Conversion is recursive: entities nested in ``collect(n)`` results or
+Cypher map literals are fully converted. Records whose columns contain
+only string, integer, float, bool, None, Duration, or spatial Point
+values are JSON-serializable. Records containing neo4j.time.DateTime,
+Date, or Time property values are NOT JSON-serializable because those
+types have no built-in JSON representation and are returned as driver
+objects by the passthrough scalar branch.
+
+neo4j.graph.Path objects are iterable over their *relationships only*
+(``Path.__iter__`` returns ``iter(self._relationships)``). Iterating a
+Path therefore produces a list of converted Relationship dicts; the
+start node, end node, and all intermediate nodes are absent from the
+converted output. This is the documented flat-record contract for Path
+columns; callers that need node data from a path must access
+``path.nodes`` before conversion.
+
+The tests feed real driver ``neo4j.graph.Node``/``Relationship``/``Path``
+objects through execute_query (mirroring the issue reproduction, no
+server needed), pin the unchanged behavior for plain mappings, iterables,
+paths and primitives, and cover the related
 ``GraphAnalytics.connected_components`` envelope read reported in the
 same issue.
 
@@ -175,6 +192,61 @@ class TestExecuteQueryRecordConversion(unittest.TestCase):
         self.assertEqual(record["r"]["_type"], "KNOWS")
         self.assertEqual(record["r"]["_element_id"], "4:rel:1")
 
+    def test_reserved_key_node_labels_overwritten_by_identity(self):
+        # A user property literally named "_labels" occupies the same key that
+        # _convert_query_value uses for the node's label list.  The identity
+        # value is written last and therefore wins; the user value is lost.
+        # This is documented behaviour: "_labels", "_type", and "_element_id"
+        # are reserved and must not be used as Neo4j property names in schemas
+        # managed by this library.
+        node = Node(Graph(), "4:abc:10", 10, ["Tag"], {"_labels": "user-value", "x": 1})
+        store = _make_store([{"n": node}])
+
+        result = store.execute_query("MATCH (n) RETURN n")
+
+        record = result["records"][0]["n"]
+        # Identity wins: the sorted label list replaces the user string.
+        self.assertEqual(record["_labels"], ["Tag"])
+        # The user string "user-value" is no longer accessible.
+        self.assertNotEqual(record["_labels"], "user-value")
+        # Unrelated properties are unaffected.
+        self.assertEqual(record["x"], 1)
+        self.assertEqual(record["_element_id"], "4:abc:10")
+
+    def test_reserved_key_node_element_id_overwritten_by_identity(self):
+        # A user property named "_element_id" is overwritten by the node's
+        # actual element_id string.  Same reservation rule as "_labels".
+        node = Node(
+            Graph(), "4:abc:11", 11, ["Resource"], {"_element_id": "app-id-xyz"}
+        )
+        store = _make_store([{"n": node}])
+
+        result = store.execute_query("MATCH (n) RETURN n")
+
+        record = result["records"][0]["n"]
+        # Identity wins: the driver's element_id replaces the user value.
+        self.assertEqual(record["_element_id"], "4:abc:11")
+        self.assertNotEqual(record["_element_id"], "app-id-xyz")
+
+    def test_reserved_key_relationship_type_overwritten_by_identity(self):
+        # A user property named "_type" on a Relationship is overwritten by
+        # the relationship type string.  Same reservation rule as "_labels".
+        graph = Graph()
+        rel = graph.relationship_type("KNOWS")(
+            graph, "4:rel:20", 20, {"_type": "rdf:type", "since": 2021}
+        )
+        store = _make_store([{"r": rel}])
+
+        result = store.execute_query("MATCH ()-[r]->() RETURN r")
+
+        record = result["records"][0]["r"]
+        # Identity wins: the relationship type replaces the user value.
+        self.assertEqual(record["_type"], "KNOWS")
+        self.assertNotEqual(record["_type"], "rdf:type")
+        # Unrelated properties are unaffected.
+        self.assertEqual(record["since"], 2021)
+        self.assertEqual(record["_element_id"], "4:rel:20")
+
     def test_collect_of_nodes_converts_recursively_and_is_json_serializable(self):
         graph = Graph()
         nodes = [
@@ -238,18 +310,80 @@ class TestExecuteQueryRecordConversion(unittest.TestCase):
 
         self.assertEqual(result["records"], [{"xs": [1, 2, 3]}])
 
-    def test_path_like_iterable_stays_a_list(self):
-        class _PathLike:
-            """Path objects are iterable and do not implement items()."""
+    def test_real_path_converts_to_list_of_relationship_dicts_only(self):
+        # neo4j.graph.Path.__iter__ is defined as:
+        #     def __iter__(self) -> Iterator[Relationship]:
+        #         return iter(self._relationships)
+        # It yields Relationship objects only — nodes are NOT yielded.
+        # _convert_query_value therefore produces a list of converted
+        # Relationship dicts; the start/end nodes are absent from the result.
+        # This is the documented flat-record contract for Path columns.
+        graph = Graph()
+        n1 = Node(graph, "4:a:10", 10, ["Person"], {"name": "Alice"})
+        n2 = Node(graph, "4:a:20", 20, ["Person"], {"name": "Bob"})
+        RelKnows = graph.relationship_type("KNOWS")
+        r1 = RelKnows(graph, "4:rel:1", 1, {"since": 2020})
+        r1._start_node = n1
+        r1._end_node = n2
 
-            def __iter__(self):
-                return iter(["n0", "r0", "n1"])
+        from neo4j.graph import Path
 
-        store = _make_store([{"p": _PathLike()}])
+        path = Path(n1, r1)
+        store = _make_store([{"p": path}])
 
         result = store.execute_query("MATCH p = (a)-[r]->(b) RETURN p")
 
-        self.assertEqual(result["records"], [{"p": ["n0", "r0", "n1"]}])
+        records = result["records"]
+        self.assertEqual(len(records), 1)
+        path_value = records[0]["p"]
+
+        # The converted path is a list containing one Relationship dict.
+        self.assertIsInstance(path_value, list)
+        self.assertEqual(len(path_value), 1)
+
+        rel_dict = path_value[0]
+        # Relationship properties and identity are present.
+        self.assertEqual(rel_dict["since"], 2020)
+        self.assertEqual(rel_dict["_type"], "KNOWS")
+        self.assertEqual(rel_dict["_element_id"], "4:rel:1")
+
+        # Node data (Alice, Bob) is absent — Path.__iter__ does not yield nodes.
+        self.assertNotIn("name", rel_dict)
+        path_str = str(path_value)
+        self.assertNotIn("Alice", path_str)
+        self.assertNotIn("Bob", path_str)
+
+        # The result is JSON-serializable (all values are plain Python).
+        json.dumps(records)
+
+    def test_multi_hop_path_produces_one_rel_dict_per_hop(self):
+        # A two-hop path yields two Relationship dicts and no node dicts.
+        graph = Graph()
+        n1 = Node(graph, "4:a:1", 1, ["A"], {"x": 1})
+        n2 = Node(graph, "4:a:2", 2, ["B"], {"x": 2})
+        n3 = Node(graph, "4:a:3", 3, ["C"], {"x": 3})
+        r1 = graph.relationship_type("FIRST")(graph, "4:rel:1", 1, {"order": 1})
+        r1._start_node = n1
+        r1._end_node = n2
+        r2 = graph.relationship_type("SECOND")(graph, "4:rel:2", 2, {"order": 2})
+        r2._start_node = n2
+        r2._end_node = n3
+
+        from neo4j.graph import Path
+
+        path = Path(n1, r1, r2)
+        store = _make_store([{"p": path}])
+
+        result = store.execute_query("MATCH p = (a)-[*2]->(c) RETURN p")
+
+        path_value = result["records"][0]["p"]
+        self.assertIsInstance(path_value, list)
+        self.assertEqual(len(path_value), 2)
+        self.assertEqual(path_value[0]["_type"], "FIRST")
+        self.assertEqual(path_value[0]["order"], 1)
+        self.assertEqual(path_value[1]["_type"], "SECOND")
+        self.assertEqual(path_value[1]["order"], 2)
+        json.dumps(result["records"])
 
     def test_string_and_primitive_values_pass_through(self):
         row = {"name": "Alice", "age": 30, "score": 1.5, "flag": True, "meta": None}

@@ -433,7 +433,7 @@ class GraphAnalytics:
         self,
         labels: Optional[List[str]] = None,
         **options,
-    ) -> Dict[str, Any]:
+    ) -> List[Dict[str, Any]]:
         """
         Find connected components in the graph.
 
@@ -445,7 +445,8 @@ class GraphAnalytics:
             **options: Additional options
 
         Returns:
-            Component information
+            List of component dicts, each with "component" (id) and
+            "nodes" (list of node ids).
         """
         backend_type = type(self.backend).__name__
 

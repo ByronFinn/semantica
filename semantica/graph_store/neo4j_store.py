@@ -69,12 +69,29 @@ def _convert_query_value(value: Any) -> Any:
     Node and Relationship implement the Mapping protocol while __iter__
     yields property *keys*, so entities must be matched before the
     generic branches — otherwise they degrade to a list of property
-    names (#1727). Entities serialize as their property dict plus
-    identity metadata under reserved, underscore-prefixed keys:
-    "_labels" (sorted) for nodes, "_type" for relationships, and
-    "_element_id" for both. The "_"-prefixed namespace is reserved, so
-    user properties (e.g. a "type" property, common in RDF-style data)
-    are never shadowed and every key keeps one deterministic meaning.
+    names (#1727). Entities are expanded to a plain dict of their stored
+    properties plus identity metadata under reserved, underscore-prefixed
+    keys: "_labels" (sorted list) for nodes, "_type" (string) for
+    relationships, and "_element_id" (string) for both.
+
+    The "_"-prefixed namespace is reserved by convention so user
+    properties named "labels", "type", or "element_id" (no underscore)
+    are never shadowed. User properties that themselves start with "_"
+    (e.g. "_labels", "_type", "_element_id") will be overwritten by the
+    corresponding identity key; such names should not be used as Neo4j
+    property names in schemas managed by this library.
+
+    Scalar Neo4j property values that have no Python built-in equivalent
+    (neo4j.time.DateTime, Date, Time) are returned as-is from the driver
+    and are NOT JSON-serializable. Properties that are tuples internally
+    (neo4j.time.Duration, neo4j.spatial.Point) are expanded to lists by
+    the generic ``__iter__`` branch and ARE JSON-serializable. String,
+    integer, float, bool, and None properties are always JSON-safe.
+
+    Containers (list, dict, Cypher maps) and nested entity values are
+    converted recursively. neo4j.graph.Path objects are iterable over
+    their relationships only; all path-node data is absent from the
+    converted output (see notes on Path in the module docstring).
     """
     if NEO4J_AVAILABLE and isinstance(value, (Node, Relationship)):
         converted = dict(value)
@@ -839,11 +856,14 @@ class Neo4jStore:
 
         Returns:
             Query results: dict with "success", "records", "keys" and
-            "metadata". Record values are plain Python data, converted
-            recursively; Node and Relationship values become property
-            dicts that also carry their identity under reserved,
-            underscore-prefixed keys ("_labels" or "_type", and
-            "_element_id").
+            "metadata". Record values are converted recursively by
+            ``_convert_query_value``: Node and Relationship objects
+            become plain dicts of their stored properties plus identity
+            keys "_labels" / "_type" and "_element_id"; lists and Cypher
+            maps are recursed into. Scalar Neo4j temporal values
+            (DateTime, Date, Time) pass through as driver objects and
+            are not JSON-serializable; all other common property types
+            (str, int, float, bool, None, Duration, Point) are.
         """
         tracking_id = self.progress_tracker.start_tracking(
             module="graph_store",
